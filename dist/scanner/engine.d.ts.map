@@ -1,0 +1,1 @@
+{"version":3,"file":"engine.d.ts","sourceRoot":"","sources":["../../src/scanner/engine.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;GAYG;AAGH,OAAO,EAAE,UAAU,EAAE,UAAU,EAA6C,MAAM,YAAY,CAAC;AAK/F,qBAAa,UAAU;IACrB,OAAO,CAAC,MAAM,CAAa;gBAEf,MAAM,EAAE,OAAO,CAAC,UAAU,CAAC,GAAG;QAAE,GAAG,EAAE,MAAM,CAAA;KAAE;IAInD,GAAG,IAAI,OAAO,CAAC,UAAU,CAAC;IAgFhC,OAAO,CAAC,WAAW;CAsCpB"}

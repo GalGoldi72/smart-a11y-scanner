@@ -1,0 +1,44 @@
+# Smart A11y Scanner — Example Configuration
+# Copy to config.yaml and customize for your project.
+
+# Target URL to scan
+url: "https://your-app.example.com"
+
+# Crawl depth (0 = single page, 1 = page + direct links, 2 = two levels deep)
+depth: 2
+
+# Maximum pages to crawl
+maxPages: 100
+
+# Timeout per page in milliseconds
+pageTimeout: 10000
+
+# Output format: json | html | csv
+output: json
+
+# Output file path (optional — defaults to stdout for json/csv)
+# outputPath: ./a11y-reports/scan-results.json
+
+# WCAG conformance levels to check
+wcagLevels:
+  - A
+  - AA
+
+# Minimum severity to report: critical | major | minor | advisory
+severityThreshold: advisory
+
+# Enable verbose logging
+verbose: false
+
+# Azure DevOps integration (set to true to enable bug filing)
+ado: false
+
+# ADO connection (required if ado: true)
+# Set ADO_PAT environment variable for the Personal Access Token
+# adoOrg: "https://dev.azure.com/your-org"
+# adoProject: "YourProject"
+# adoAreaPath: "YourProject\\Accessibility"
+# adoIterationPath: "YourProject\\Sprint 1"
+# adoTags:
+#   - Accessibility
+#   - Automated
