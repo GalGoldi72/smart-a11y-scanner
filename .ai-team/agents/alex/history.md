@@ -17,4 +17,18 @@
 - Engine's `ScanResult.summary.bySeverity` is `Record<Severity, number>` and `byCategory` is `Record<string, number>` — used directly in HTML/JSON reporters.
 - Finding has `selector` (CSS path), `message` (issue text), `htmlSnippet`, `screenshot` (base64 PNG) — different field names than I initially assumed.
 - Build has pre-existing errors in Bobbie's detection code (`flow-analyzer.ts`, `interaction-simulator.ts`) — not my problem but noted.
+- Drummer's `Severity` type is `'critical' | 'serious' | 'moderate' | 'minor'` (axe-core aligned), NOT `'major' | 'advisory'`. Fixed cli.ts SEVERITY_COLORS and sevOrder to match. All other files using the old names (html-reporter, ado/client, etc.) are other teams' responsibility.
+- Naomi's engine `ScanConfig` (scanner/types.ts) already has `timeout: number` (overall scan limit in ms) and `auth?: AuthConfig` with `loginUrl`, `credentials`, `cookies`, `waitForSelector`. No need to invent new auth fields — just map CLI flags to `AuthConfig`.
+- `AuthConfig.credentials` is `{ username, password }` nested inside AuthConfig, not a flat `auth` object. The engine uses `httpCredentials` from it.
+- Added `"smart-a11y-scanner"` as a second bin alias so `npx smart-a11y-scanner scan <url>` works alongside the original `a11y-scan`.
+- `--timeout` defaults to 600s (10 min), passed directly to engine's `timeout` field (in ms). Engine already supports it.
+- `--auth-url` maps to `AuthConfig.loginUrl`, `--credentials` maps to `AuthConfig.credentials`. Credentials also readable from `A11Y_SCANNER_CREDENTIALS` env var.
+- ADO bug filing is gated behind `--ado` flag and prints a POC placeholder warning. No code paths execute ADO integration without the flag.
+- HTML report now uses card-based layout per finding (replaced the flat table). Cards are grouped by page with page-level screenshots at the top of each section.
+- Repro steps rendered as a CSS counter-based numbered timeline (circles + connecting line). No JS needed for the numbering — pure CSS `counter-reset`/`counter-increment`.
+- Screenshot lightbox is a simple overlay div toggled via JS `openLightbox()`/`closeLightbox()`. Escape key also closes it. No external libraries.
+- Finding fields `reproSteps?: string[]` and `screenshot?: string` are optional — all rendering guarded with `?.length` / truthiness checks. Safe if engine doesn't populate them.
+- `PageResult.screenshot?: string` added for page-state screenshots shown at the top of each page section. `ExplorationState.stateScreenshot` added by Naomi for the engine side.
+- JSON reporter conditionally includes `reproSteps` and `screenshot` using spread syntax — omitted from output when not present, keeping JSON clean.
+- All images are inline base64 — the HTML report remains fully self-contained with zero external dependencies.
 
