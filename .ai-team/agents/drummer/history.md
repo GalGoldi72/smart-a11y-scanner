@@ -39,3 +39,8 @@
 - WCAG criterion parser handles "wcag111"→"1.1.1" pattern: first digit=principle, second=guideline, rest=criterion
 - Fallback strategy: if no "cat.*" tag, derive category from WCAG principle/guideline in criterion tags
 - **Lesson learned:** Our RuleCategory taxonomy is well-aligned with axe-core; no gaps found. The earlier decision to align Severity with axe-core's impact scale pays off here — `mapAxeImpactToSeverity` is trivial
+
+## 2026-02-23: Team Decisions Merged
+📌 **ADO Test Plan Integration Architecture** — Holden's design mentions decision points for you: Should chrome elements (P3) that ARE visited still get a11y analysis, or skip analysis entirely? Recommend: analyze if visited, but don't prioritize visiting. This affects rule runner behavior when elements are classified as chrome.
+
+📌 **AI Test Generation Design** — Holden's post-phase design includes edge case generation. Future phases will use LLM to identify accessibility issues that aren't covered by manual test plans. Your rules catalog will be the target — the LLM learns patterns from rule violations and synthesizes scenarios to trigger gaps.

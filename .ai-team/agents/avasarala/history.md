@@ -33,3 +33,10 @@
 - **Distribution Strategy:** `docs/distribution-strategy.md` — packaging and publishing analysis
 - **Team Roster:** `.ai-team/team.md` — 9-member team including Drummer (A11y Expert) and Bobbie (UI Expert)
 - **Tech Stack:** TypeScript, Node.js, Playwright, Axe-core, Azure DevOps REST API
+
+## 2026-02-23: Team Decisions Merged
+📌 **ADO Test Plan Integration Feature Largely Complete (Core Phases 1-8)** — Core phases delivered: Element prioritization (Naomi), GuidedExplorer (Naomi), Test Plan Parser (Naomi), CLI flags (Alex), Report integration (Alex). All types and integration wiring complete. Feature is now ready for demo: 11y-scan scan <url> --test-plan-file ./test-plans/my-plan.yaml. Users can provide test cases, scanner executes them + auto-explores, reports show per-step results.
+
+📌 **AI Test Generation Post-Roadmap** — Holden's new design: Post-demo feature to auto-synthesize test scenarios from execution patterns. PatternExtractor + TestPlanGenerator (LEARN → INVENT pipeline). ~4 weeks, 7 implementation phases. Lower priority than core test plan execution. Feature enables users to get progressively better test coverage over multiple runs without manually designing new scenarios.
+
+📌 **Element Prioritization Improves All Scans** — Smart P1/P2/P3 classification: Content first, Navigation second, Chrome skipped. DFS now allocates time to actual page interactions instead of shell infrastructure. Immediate value across all scan modes (manual, test-plan, SPA discovery).

@@ -20,3 +20,8 @@
 - `buildSelector()` is duplicated across `evaluate()` calls because each runs in an isolated browser context — no way to share code between them. TypeScript strict mode requires `const cur = current` pattern before filter callbacks that reference `current` in a loop, to avoid circular type inference with `parentElement`.
 - CDP event listener detection is best-effort — only works on Chromium, fails gracefully on Firefox/WebKit.
 - Form purpose detection uses heuristics on field names, ids, autocomplete attributes, and form action URLs. Works for common patterns; AI-based classification would be stronger for v2.
+
+## 2026-02-23: Team Decisions Merged
+📌 **Smart Element Prioritization Deployed in DeepExplorer** — Design by Holden, implementation by Naomi. Your UIDetector in detection/ remains independent, but the new prioritizer in deep-explorer.ts now classifies interactive elements P1/P2/P3. This doesn't replace your detection work, but improves the DFS traversal order immediately. Future phases may wire detection into the prioritizer for even richer classification.
+
+📌 **ADO Test Plan Integration Architecture** — Holden's design mentions you may implement Part 1 (ElementPrioritizer as a standalone module). Currently Naomi put it inline in deep-explorer.ts. Post-POC: consider whether to extract to a dedicated src/scanner/element-prioritizer.ts module.
