@@ -26,3 +26,27 @@
 📌 **Smart Element Prioritization Deployed** — Naomi's element classifier now sorts elements P1/P2/P3. This improves deep-explorer's behavior immediately. Update test expectations: DFS now favors content over chrome. May affect test assertions that relied on old element order.
 
 📌 **AI Test Generation Post-Phase Design** — Holden designed pattern learning and test synthesis pipeline. Post-POC feature. Relevant for future test creation strategies.
+
+## 2026-02-24: LEARN → INVENT Pipeline Tests
+
+- Created 3 new test files for the LEARN → INVENT pipeline (60 tests): `pattern-database.test.ts` (22 tests), `pattern-extractor.test.ts` (18 tests), `test-plan-generator.test.ts` (20 tests). Total suite: 103 tests, all passing.
+- **PatternDatabase** tests use real `os.tmpdir()` temp directories, not fs mocks. Clean up in `afterEach`. The `siteDir()` method is private — tested indirectly through `save()` path output. `loadLatest` returns `null` gracefully when directory is missing.
+- **PatternExtractor** is stateless — instantiate once, feed mock data. Key mock types: `PageSnapshot` (with `accessibilityTree`, `interactiveElements`, `landmarks`, `headings`), `GuidedStepResult` (from scanner/types.ts), `ImportedTestScenario` (from ado/types.ts), `GuidedExplorationResult`. The extractor groups snapshots by URL, builds heading trees, and classifies tested vs untested elements via label-text matching against step results.
+- **TestPlanGenerator** has 4 heuristic strategies: coverage-completion, depth-completion, cross-page-transfer, element-type-coverage. Strategy 5 (edge-case-generation) is an LLM stub returning `[]`. The `computeStructuralSimilarity()` method is public and directly testable. Confidence filtering applies after all strategies run. `maxPerStrategy` caps per-strategy output; `maxTotal` caps the final combined output.
+- Cross-page transfer requires >0.7 structural similarity (Jaccard on landmarks 40% + headings 20% + element groups 40%). Two empty pages score 1.0 (both sets are empty, Jaccard returns 1). Completely disjoint roles score 0.
+- The `GeneratedTestScenario` type extends `ImportedTestScenario` with `Omit` for ADO fields and adds `generatedFrom`, `confidence`, `rationale`, `sourceScenarioTitle`, `llmGenerated`. Fixed fields: `adoTestCaseId: -1`, `suiteName: 'ai-generated'`.
+- No bugs discovered in the source modules. All 3 modules are well-structured for testing.
+
+## 2026-02-25: DynamicAnalyzer Test Suite
+
+- Created `src/__tests__/dynamic-analyzer.test.ts` with 21 tests across 6 describe blocks. All passing.
+- **Test strategy:** Stub private check methods via `vi.spyOn(analyzer as any, methodName).mockResolvedValue([])` so each test isolates a single check, then mock `page.evaluate` with sequential `mockResolvedValueOnce` calls matching the exact evaluate call order of that check.
+- Naomi's `DynamicAnalyzer` implementation was already present — tests align to actual rule IDs and Finding shapes.
+- **Rule IDs tested:** `zoom-reflow-horizontal-scroll`, `zoom-reflow-text-clipped`, `text-spacing-overflow`, `keyboard-trap` (critical), `focus-visible-missing`, `focus-order-mismatch`, `label-in-name`, `target-size-minimum`, `landmark-main-missing`, `skip-link-missing`, `orientation-portrait-overflow`, `orientation-portrait-content-hidden`, `orientation-css-lock`.
+- Each private check method (`checkZoomReflow`, `checkTextSpacing`, `checkKeyboardNavigation`, `checkFocusOrder`, `checkLabelInName`, `checkTargetSize`, `checkLandmarks`, `checkSkipLinks`, `checkLiveRegions`, `checkOrientation`) calls `page.evaluate()` a known number of times in a fixed sequence. Mock order matters.
+- Integration tests verify: Finding[] type conformance, deadline enforcement (expired deadline → 0 findings, 0 evaluate calls), error isolation (one check throwing doesn't block others).
+- `keyboard-trap` detection triggers when 3 consecutive Tab presses land on the same `selector` (not 'body'). Severity is `critical`.
+- `focus-visible-missing` triggers when >20% of focused non-body elements lack `hasVisibleIndicator` (outlineStyle + boxShadow check).
+- `focus-order-mismatch` requires ≥3 DOM-order focusable elements and ≥2 backward jumps of >200px vertically during Tab navigation.
+- `checkOrientation` uses viewport sizes 768×1024 (portrait) and 1024×768 (landscape) with a 20px tolerance for scrollbar width.
+- Total project test count: 124 tests (103 prior + 21 new).
