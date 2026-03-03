@@ -33,7 +33,7 @@ export class Crawler {
   }
 
   /** Crawl starting from config.url, return ordered list of URLs to scan */
-  async discoverPages(context: BrowserContext): Promise<{
+  async discoverPages(context: BrowserContext, deadline?: number): Promise<{
     urls: string[];
     links: PageLink[];
   }> {
@@ -46,6 +46,11 @@ export class Crawler {
     const orderedUrls: string[] = [];
 
     while (this.queue.length > 0 && orderedUrls.length < this.config.maxPages) {
+      // Check timeout before processing each URL
+      if (deadline && Date.now() >= deadline) {
+        break;
+      }
+
       const item = this.queue.shift()!;
       const normalized = this.normalizeUrl(item.url);
 
@@ -105,6 +110,12 @@ export class Crawler {
           // Skip malformed URLs
         }
       }
+
+      // SPA route discovery — click navigation elements to find client-side routes
+      if (this.config.spaDiscovery) {
+        const spaLinks = await this.discoverSpaRoutes(context, page, url);
+        pageLinks.push(...spaLinks);
+      }
     } catch (err) {
       // Navigation failed — page might be down, timeout, etc.
       // We still continue crawling other URLs
@@ -113,6 +124,108 @@ export class Crawler {
     }
 
     return pageLinks;
+  }
+
+  /**
+   * Discover SPA routes by clicking navigation elements and observing URL changes.
+   * Targets: nav links, role=link/tab/menuitem, buttons in nav/header/sidebar,
+   * data-href, routerlink, and hash/javascript links with click handlers.
+   */
+  private async discoverSpaRoutes(
+    context: BrowserContext,
+    page: Page,
+    sourceUrl: string,
+  ): Promise<PageLink[]> {
+    const discovered: PageLink[] = [];
+    const seenUrls = new Set<string>();
+
+    // Collect clickable nav element handles from the live page
+    const spaSelector = [
+      'nav a',
+      '[role="link"]',
+      '[role="tab"]',
+      '[role="menuitem"]',
+      'nav button',
+      'header button',
+      '[class*="sidebar"] button',
+      '[class*="nav"] button',
+      '[data-href]',
+      '[routerlink]',
+      'a[href="#"]',
+      'a[href^="javascript:"]',
+    ].join(', ');
+
+    const candidates = await page.evaluate((sel: string) => {
+      const els = Array.from(document.querySelectorAll(sel));
+      // Deduplicate and collect info for each element
+      return els.map((el, idx) => ({
+        index: idx,
+        text: (el.textContent?.trim() || '').substring(0, 100),
+        tag: el.tagName.toLowerCase(),
+        visible: !!(el as HTMLElement).offsetParent || (el as HTMLElement).offsetHeight > 0,
+      })).filter(c => c.visible && c.text.length > 0);
+    }, spaSelector);
+
+    // Limit to avoid spending too long — click up to 30 nav elements
+    const maxClicks = Math.min(candidates.length, 30);
+
+    for (let i = 0; i < maxClicks; i++) {
+      const candidate = candidates[i];
+      try {
+        // Re-query elements each iteration since DOM may have changed
+        const elements = await page.$$(spaSelector);
+        const el = elements[candidate.index];
+        if (!el) continue;
+
+        // Verify element is still visible and interactable
+        const isVisible = await el.isVisible().catch(() => false);
+        if (!isVisible) continue;
+
+        const urlBefore = page.url();
+
+        await el.click({ timeout: 3000 });
+        // Wait for potential SPA navigation
+        await page.waitForTimeout(2000);
+
+        const urlAfter = page.url();
+
+        if (urlAfter !== urlBefore && !seenUrls.has(urlAfter)) {
+          try {
+            const parsed = new URL(urlAfter);
+            // Only keep same-domain navigations
+            if (parsed.hostname === this.baseDomain) {
+              seenUrls.add(urlAfter);
+              const normalized = this.normalizeUrl(urlAfter);
+              const pathDisplay = parsed.pathname + parsed.hash;
+              console.log(`  → SPA route discovered: ${pathDisplay} (via nav click)`);
+              discovered.push({
+                sourceUrl,
+                targetUrl: normalized,
+                linkText: `[SPA] ${candidate.text}`,
+              });
+            }
+          } catch {
+            // Malformed URL — skip
+          }
+
+          // Navigate back to source for next click
+          try {
+            await page.goto(sourceUrl, {
+              waitUntil: 'domcontentloaded',
+              timeout: this.config.pageTimeoutMs,
+            });
+            await page.waitForTimeout(1000);
+          } catch {
+            // Can't navigate back — stop SPA discovery for this page
+            break;
+          }
+        }
+      } catch {
+        // Click failed (element detached, timeout, etc.) — skip and continue
+      }
+    }
+
+    return discovered;
   }
 
   /** Fetch and parse robots.txt (basic disallow parsing) */

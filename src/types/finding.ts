@@ -21,9 +21,9 @@ export type BugPriority = 0 | 1 | 2 | 3;
 export function severityToPriority(severity: Severity): BugPriority {
   const map: Record<Severity, BugPriority> = {
     critical: 0,
-    major: 1,
-    minor: 2,
-    advisory: 3,
+    serious: 1,
+    moderate: 2,
+    minor: 3,
   };
   return map[severity];
 }

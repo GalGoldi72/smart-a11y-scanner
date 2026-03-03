@@ -11,11 +11,72 @@
  */
 
 import { Page, ElementHandle } from 'playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 import { PageMetadata, PageResult, Finding } from './types.js';
 import { ScanConfig } from './types.js';
+import { RuleCategory, Severity, WcagLevel } from '../rules/types.js';
+
+/** Map axe-core category tags to our RuleCategory */
+const AXE_CATEGORY_MAP: Record<string, RuleCategory> = {
+  'cat.color': 'distinguishable',
+  'cat.forms': 'forms',
+  'cat.aria': 'aria',
+  'cat.text-alternatives': 'images',
+  'cat.name-role-value': 'aria',
+  'cat.semantics': 'adaptable',
+  'cat.structure': 'adaptable',
+  'cat.keyboard': 'keyboard',
+  'cat.time-and-media': 'multimedia',
+  'cat.tables': 'adaptable',
+  'cat.language': 'readable',
+  'cat.sensory-and-visual-cues': 'distinguishable',
+  'cat.parsing': 'compatible',
+};
+
+/** Map hand-rolled ruleIds to equivalent axe-core ruleIds for deduplication */
+const HANDROLLED_TO_AXE_EQUIV: Record<string, string[]> = {
+  'img-alt-text': ['image-alt', 'input-image-alt'],
+  'form-input-label': ['label', 'select-name'],
+  'document-lang': ['html-has-lang', 'html-lang-valid'],
+  'link-name': ['link-name'],
+  'button-name': ['button-name'],
+  'color-contrast': ['color-contrast'],
+  'heading-hierarchy': ['heading-order'],
+  'visual-heading-no-semantic': ['p-as-heading'],
+};
+
+/**
+ * Normalize a page URL: if the hostname differs from the scan target only by a
+ * `sip.` prefix (e.g. sip.security.microsoft.com vs security.microsoft.com),
+ * replace the hostname with the target hostname so findings show the user-facing URL.
+ */
+export function normalizePageUrl(rawUrl: string, targetUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const targetHostname = new URL(targetUrl).hostname;
+    if (parsed.hostname === `sip.${targetHostname}`) {
+      parsed.hostname = targetHostname;
+      return parsed.toString();
+    }
+  } catch { /* ignore parse errors */ }
+  return rawUrl;
+}
 
 export class PageAnalyzer {
   constructor(private config: ScanConfig) {}
+
+  /**
+   * Inject esbuild's __name polyfill into the browser context.
+   * tsx/esbuild decorates function declarations with __name() calls, but
+   * page.evaluate() runs in the browser where __name doesn't exist.
+   */
+  private async injectEsbuildPolyfill(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      if (typeof (globalThis as any).__name === 'undefined') {
+        (globalThis as any).__name = (fn: any) => fn;
+      }
+    });
+  }
 
   async analyze(page: Page, url: string): Promise<PageResult> {
     const start = Date.now();
@@ -32,6 +93,9 @@ export class PageAnalyzer {
 
       const metadata = await this.extractMetadata(page, url);
 
+      // Inject esbuild polyfill before running hand-rolled checks
+      await this.injectEsbuildPolyfill(page);
+
       // Run all checks in parallel
       const checkResults = await Promise.all([
         this.checkImagesAltText(page),
@@ -40,21 +104,36 @@ export class PageAnalyzer {
         this.checkDocumentLanguage(page),
         this.checkEmptyLinksAndButtons(page),
         this.checkColorContrastCandidates(page),
+        this.checkVisualHeadingsWithoutSemantics(page),
       ]);
 
       for (const result of checkResults) {
         findings.push(...result);
       }
 
+      // Run axe-core checks and merge with hand-rolled findings
+      const axeFindings = await this.runAxeChecks(page);
+      const merged = this.deduplicateFindings(findings, axeFindings);
+
+      // Debug logging
+      if (merged.length > 0) {
+        console.log(`  📋 ${merged.length} finding(s) on ${new URL(url).pathname}`);
+      }
+
       // Capture screenshots of violations if configured
-      if (this.config.captureScreenshots && findings.length > 0) {
-        await this.captureViolationScreenshots(page, findings);
+      if (this.config.captureScreenshots && merged.length > 0) {
+        await this.captureViolationScreenshots(page, merged);
+      }
+
+      // Stamp page URL on each finding so they're self-contained
+      for (const f of merged) {
+        f.pageUrl = normalizePageUrl(f.pageUrl || url, this.config.url);
       }
 
       return {
         url,
         metadata,
-        findings,
+        findings: merged,
         analysisTimeMs: Date.now() - start,
       };
     } catch (err) {
@@ -94,6 +173,17 @@ export class PageAnalyzer {
   /** WCAG 1.1.1 — Images must have alt text */
   private async checkImagesAltText(page: Page): Promise<Finding[]> {
     return page.evaluate(() => {
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        const classes = Array.from(el.classList).join('.');
+        const parent = el.parentElement;
+        const index = parent
+          ? Array.from(parent.children).filter(c => c.tagName === el.tagName).indexOf(el)
+          : 0;
+        return `${tag}${classes ? '.' + classes : ''}:nth-of-type(${index + 1})`;
+      };
+
       const findings: any[] = [];
       const images = document.querySelectorAll('img');
 
@@ -133,17 +223,6 @@ export class PageAnalyzer {
         }
       }
 
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        const tag = el.tagName.toLowerCase();
-        const classes = Array.from(el.classList).join('.');
-        const parent = el.parentElement;
-        const index = parent
-          ? Array.from(parent.children).filter(c => c.tagName === el.tagName).indexOf(el)
-          : 0;
-        return `${tag}${classes ? '.' + classes : ''}:nth-of-type(${index + 1})`;
-      }
-
       return findings;
     }) as Promise<Finding[]>;
   }
@@ -151,6 +230,14 @@ export class PageAnalyzer {
   /** WCAG 1.3.1 / 4.1.2 — Form inputs must have associated labels */
   private async checkFormLabels(page: Page): Promise<Finding[]> {
     return page.evaluate(() => {
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        const type = el.getAttribute('type') || '';
+        const name = el.getAttribute('name') || '';
+        return `${tag}${type ? `[type="${type}"]` : ''}${name ? `[name="${name}"]` : ''}`;
+      };
+
       const findings: any[] = [];
       const inputs = document.querySelectorAll(
         'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea'
@@ -186,14 +273,6 @@ export class PageAnalyzer {
         }
       }
 
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        const tag = el.tagName.toLowerCase();
-        const type = el.getAttribute('type') || '';
-        const name = el.getAttribute('name') || '';
-        return `${tag}${type ? `[type="${type}"]` : ''}${name ? `[name="${name}"]` : ''}`;
-      }
-
       return findings;
     }) as Promise<Finding[]>;
   }
@@ -201,6 +280,11 @@ export class PageAnalyzer {
   /** WCAG 1.3.1 — Heading levels should not skip */
   private async checkHeadingHierarchy(page: Page): Promise<Finding[]> {
     return page.evaluate(() => {
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        return `${el.tagName.toLowerCase()}`;
+      };
+
       const findings: any[] = [];
       const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
       let prevLevel = 0;
@@ -245,7 +329,7 @@ export class PageAnalyzer {
         findings.push({
           ruleId: 'heading-hierarchy',
           category: 'semantic-html',
-          severity: 'advisory',
+          severity: 'moderate',
           wcagLevel: 'A',
           wcagCriterion: '1.3.1',
           message: `Page has ${document.querySelectorAll('h1').length} <h1> elements (expected 1)`,
@@ -253,11 +337,6 @@ export class PageAnalyzer {
           htmlSnippet: '',
           remediation: 'Use a single <h1> for the main page heading.',
         });
-      }
-
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        return `${el.tagName.toLowerCase()}`;
       }
 
       return findings;
@@ -274,7 +353,7 @@ export class PageAnalyzer {
         findings.push({
           ruleId: 'document-lang',
           category: 'language-text',
-          severity: 'major',
+          severity: 'serious',
           wcagLevel: 'A',
           wcagCriterion: '3.1.1',
           message: 'Document missing lang attribute on <html> element',
@@ -286,7 +365,7 @@ export class PageAnalyzer {
         findings.push({
           ruleId: 'document-lang',
           category: 'language-text',
-          severity: 'major',
+          severity: 'serious',
           wcagLevel: 'A',
           wcagCriterion: '3.1.1',
           message: 'Document has empty lang attribute',
@@ -303,6 +382,13 @@ export class PageAnalyzer {
   /** WCAG 2.4.4 — Links and buttons must have discernible text */
   private async checkEmptyLinksAndButtons(page: Page): Promise<Finding[]> {
     return page.evaluate(() => {
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        const classes = Array.from(el.classList).slice(0, 2).join('.');
+        return `${tag}${classes ? '.' + classes : ''}`;
+      };
+
       const findings: any[] = [];
 
       // Check links
@@ -318,7 +404,7 @@ export class PageAnalyzer {
           findings.push({
             ruleId: 'link-name',
             category: 'navigation-structure',
-            severity: 'major',
+            severity: 'serious',
             wcagLevel: 'A',
             wcagCriterion: '2.4.4',
             message: 'Link has no discernible text',
@@ -342,7 +428,7 @@ export class PageAnalyzer {
           findings.push({
             ruleId: 'button-name',
             category: 'navigation-structure',
-            severity: 'major',
+            severity: 'serious',
             wcagLevel: 'A',
             wcagCriterion: '2.4.4',
             message: 'Button has no discernible text',
@@ -351,13 +437,6 @@ export class PageAnalyzer {
             remediation: 'Add text content, aria-label, or a value attribute to the button.',
           });
         }
-      }
-
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        const tag = el.tagName.toLowerCase();
-        const classes = Array.from(el.classList).slice(0, 2).join('.');
-        return `${tag}${classes ? '.' + classes : ''}`;
       }
 
       return findings;
@@ -371,6 +450,34 @@ export class PageAnalyzer {
    */
   private async checkColorContrastCandidates(page: Page): Promise<Finding[]> {
     return page.evaluate(() => {
+      const parseRgb = (color: string): [number, number, number] | null => {
+        const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (!match) return null;
+        return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
+      };
+
+      const luminance = (r: number, g: number, b: number): number => {
+        const [rs, gs, bs] = [r, g, b].map(c => {
+          c = c / 255;
+          return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+      };
+
+      const contrastRatio = (fg: [number, number, number], bg: [number, number, number]): number => {
+        const l1 = luminance(...fg);
+        const l2 = luminance(...bg);
+        const lighter = Math.max(l1, l2);
+        const darker = Math.min(l1, l2);
+        return (lighter + 0.05) / (darker + 0.05);
+      };
+
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        return tag;
+      };
+
       const findings: any[] = [];
       const textElements = document.querySelectorAll(
         'p, span, a, li, td, th, label, h1, h2, h3, h4, h5, h6, button, div'
@@ -401,7 +508,7 @@ export class PageAnalyzer {
               findings.push({
                 ruleId: 'color-contrast',
                 category: 'color-contrast',
-                severity: ratio < 3.0 ? 'critical' : 'major',
+                severity: ratio < 3.0 ? 'critical' : 'serious',
                 wcagLevel: 'AA',
                 wcagCriterion: '1.4.3',
                 message: `Insufficient color contrast: ratio ${ratio.toFixed(2)}:1 (needs ${threshold}:1). Color: ${color}, Background: ${bgColor}`,
@@ -414,52 +521,313 @@ export class PageAnalyzer {
         }
       }
 
-      function parseRgb(color: string): [number, number, number] | null {
-        const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-        if (!match) return null;
-        return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
-      }
-
-      function luminance(r: number, g: number, b: number): number {
-        const [rs, gs, bs] = [r, g, b].map(c => {
-          c = c / 255;
-          return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-        });
-        return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
-      }
-
-      function contrastRatio(fg: [number, number, number], bg: [number, number, number]): number {
-        const l1 = luminance(...fg);
-        const l2 = luminance(...bg);
-        const lighter = Math.max(l1, l2);
-        const darker = Math.min(l1, l2);
-        return (lighter + 0.05) / (darker + 0.05);
-      }
-
-      function buildSelector(el: Element): string {
-        if (el.id) return `#${el.id}`;
-        const tag = el.tagName.toLowerCase();
-        return tag;
-      }
-
       // Limit to first 20 contrast findings to avoid flooding
       return findings.slice(0, 20);
     }) as Promise<Finding[]>;
   }
 
-  /** Capture a full-page screenshot and attach to first N findings */
-  private async captureViolationScreenshots(page: Page, findings: Finding[]): Promise<void> {
-    try {
-      const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-      const base64 = screenshot.toString('base64');
+  /**
+   * WCAG 1.3.1 — Detect elements that visually appear as headings but don't use
+   * semantic heading tags (<h1>–<h6>) or role="heading".
+   * Checks for text with large font-size (>= 1.5x body) and/or bold font-weight
+   * that isn't inside a heading element.
+   */
+  private async checkVisualHeadingsWithoutSemantics(page: Page): Promise<Finding[]> {
+    return page.evaluate(() => {
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        const classes = Array.from(el.classList).slice(0, 2).join('.');
+        return classes ? `${tag}.${classes}` : tag;
+      };
 
-      // Attach the page screenshot to the first finding as a reference
-      // (element-level screenshots are expensive; page-level is good for POC)
-      if (findings.length > 0) {
-        findings[0].screenshot = base64;
+      const findings: any[] = [];
+      const HEADING_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+
+      // Get the base body font size for comparison
+      const bodyStyle = window.getComputedStyle(document.body);
+      const baseFontSize = parseFloat(bodyStyle.fontSize) || 16;
+      const headingThreshold = baseFontSize * 1.5; // 24px default — typical heading size
+
+      // Selectors for non-heading text containers commonly misused as headings
+      const candidates = document.querySelectorAll(
+        'p, div, span, td, li, a, strong, b, em'
+      );
+
+      for (const el of candidates) {
+        // Skip if already inside a semantic heading
+        if (el.closest('h1, h2, h3, h4, h5, h6, [role="heading"]')) continue;
+        // Skip elements with heading role themselves
+        if (el.getAttribute('role') === 'heading') continue;
+        // Skip hidden elements
+        if (!(el as HTMLElement).offsetWidth && !(el as HTMLElement).offsetHeight) continue;
+
+        const text = (el.textContent || '').trim();
+        // Only check elements with meaningful text (3–200 chars — heading length range)
+        if (text.length < 3 || text.length > 200) continue;
+
+        const style = window.getComputedStyle(el);
+        const fontSize = parseFloat(style.fontSize) || 0;
+        const fontWeight = parseInt(style.fontWeight) || 400;
+        const isBold = fontWeight >= 600;
+        const isLargeText = fontSize >= headingThreshold;
+
+        // Must be both large AND bold to look like a heading
+        if (isLargeText && isBold) {
+          // Skip if a child element is the one with the styles (avoid duplicate parent/child)
+          const children = el.children;
+          let childIsCandidate = false;
+          for (let i = 0; i < children.length; i++) {
+            const childStyle = window.getComputedStyle(children[i]);
+            if (parseFloat(childStyle.fontSize) >= headingThreshold &&
+                parseInt(childStyle.fontWeight) >= 600) {
+              childIsCandidate = true;
+              break;
+            }
+          }
+          if (childIsCandidate) continue;
+
+          findings.push({
+            ruleId: 'visual-heading-no-semantic',
+            category: 'adaptable',
+            severity: 'serious',
+            wcagLevel: 'A',
+            wcagCriterion: '1.3.1',
+            message: `Text "${text.substring(0, 80)}" is visually styled as a heading (font-size: ${fontSize.toFixed(0)}px, weight: ${fontWeight}) but does not use a heading tag (<h1>–<h6>) or role="heading".`,
+            selector: buildSelector(el),
+            htmlSnippet: el.outerHTML.substring(0, 300),
+            remediation: 'Use an appropriate heading element (<h1>–<h6>) or add role="heading" with aria-level to convey the heading semantics to assistive technologies.',
+          });
+        }
       }
-    } catch {
-      // Screenshot failed — non-fatal
+
+      // Limit to first 10 to avoid flooding
+      return findings.slice(0, 10);
+    }) as Promise<Finding[]>;
+  }
+
+  /**
+   * Analyze the currently loaded page WITHOUT navigating.
+   * Used by DeepExplorer to run checks on already-loaded SPA states.
+   * Optionally attaches repro steps (navigation breadcrumb) to each finding.
+   */
+  async analyzeCurrentPage(page: Page, reproSteps?: string[]): Promise<PageResult> {
+    const start = Date.now();
+    const findings: Finding[] = [];
+    const url = page.url();
+
+    try {
+      // Give JS-rendered pages time to settle (SPAs need more time)
+      await page.waitForTimeout(2000);
+    } catch { /* timeout failed — continue anyway */ }
+
+    // Extract metadata (non-fatal)
+    let metadata;
+    try {
+      metadata = await this.extractMetadata(page, url);
+    } catch (err) {
+      console.warn(`  ⚠ Metadata extraction failed: ${err instanceof Error ? err.message : String(err)}`);
+      metadata = { url, title: '', lang: null, metaDescription: null, metaViewport: null, h1Count: 0 };
     }
+
+    // Run hand-rolled checks (non-fatal)
+    try {
+      await this.injectEsbuildPolyfill(page);
+      const checkResults = await Promise.all([
+        this.checkImagesAltText(page),
+        this.checkFormLabels(page),
+        this.checkHeadingHierarchy(page),
+        this.checkDocumentLanguage(page),
+        this.checkEmptyLinksAndButtons(page),
+        this.checkColorContrastCandidates(page),
+        this.checkVisualHeadingsWithoutSemantics(page),
+      ]);
+      for (const result of checkResults) {
+        findings.push(...result);
+      }
+    } catch (err) {
+      console.warn(`  ⚠ Hand-rolled checks failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Run axe-core checks — ALWAYS runs even if hand-rolled checks failed
+    const axeFindings = await this.runAxeChecks(page);
+    const merged = this.deduplicateFindings(findings, axeFindings);
+
+    // Debug: log analysis results
+    try {
+      const pathname = new URL(url).pathname;
+      if (merged.length > 0) {
+        console.log(`  📋 ${merged.length} finding(s) on ${pathname} (hand-rolled: ${findings.length}, axe: ${axeFindings.length})`);
+      }
+    } catch { /* URL parse — ignore */ }
+
+    // Capture screenshots of violations if configured
+    if (this.config.captureScreenshots && merged.length > 0) {
+      try {
+        await this.captureViolationScreenshots(page, merged);
+      } catch { /* screenshot failed — non-fatal */ }
+    }
+
+    // Stamp page URL and repro steps on each finding
+    for (const f of merged) {
+      f.pageUrl = normalizePageUrl(f.pageUrl || url, this.config.url);
+      if (reproSteps && reproSteps.length > 0) {
+        f.reproSteps = [...reproSteps];
+      }
+    }
+
+    return {
+      url,
+      metadata,
+      findings: merged,
+      analysisTimeMs: Date.now() - start,
+    };
+  }
+
+  /** Capture screenshots for findings — viewport for individual findings, full-page as fallback */
+  private async captureViolationScreenshots(page: Page, findings: Finding[]): Promise<void> {
+    // Take a viewport screenshot to attach to each finding that doesn't already have one
+    let viewportScreenshot: string | undefined;
+    try {
+      const buf = await page.screenshot({ fullPage: false, type: 'png' });
+      viewportScreenshot = buf.toString('base64');
+    } catch { /* non-fatal */ }
+
+    for (const finding of findings) {
+      if (!finding.screenshot && viewportScreenshot) {
+        finding.screenshot = viewportScreenshot;
+      }
+    }
+  }
+
+  /** Run axe-core analysis and map violations to our Finding interface */
+  async runAxeChecks(page: Page): Promise<Finding[]> {
+    try {
+      const results = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+        .options({
+          iframes: true,
+          rules: {
+            // Enable experimental rule that catches <p> styled as headings (WCAG 1.3.1)
+            'p-as-heading': { enabled: true },
+          },
+        } as any)
+        .analyze();
+
+      // Always log axe-core results for diagnostics
+      const passCount = results.passes?.length ?? 0;
+      const incompleteCount = results.incomplete?.length ?? 0;
+      console.log(`  🔎 axe-core: ${results.violations.length} violation(s), ${incompleteCount} incomplete, ${passCount} passes on ${new URL(page.url()).pathname}`);
+
+      const findings: Finding[] = [];
+
+      for (const violation of results.violations) {
+        const category = this.mapAxeCategory(violation.tags);
+        const severity = this.mapAxeSeverity(violation.impact || 'minor');
+        const wcagLevel = this.extractWcagLevel(violation.tags);
+        const wcagCriterion = this.extractWcagCriterion(violation.tags);
+
+        for (const node of violation.nodes) {
+          const selector = Array.isArray(node.target) && node.target.length > 0
+            ? String(node.target[0])
+            : '';
+          findings.push({
+            ruleId: violation.id,
+            category,
+            severity,
+            wcagLevel,
+            wcagCriterion,
+            message: `${violation.description}. ${node.failureSummary || ''}`.trim(),
+            selector,
+            pageUrl: normalizePageUrl(page.url(), this.config.url),
+            htmlSnippet: (node.html || '').substring(0, 300),
+            remediation: `${violation.help}. See: ${violation.helpUrl}`,
+          });
+        }
+      }
+
+      // Skip ALL incomplete/needs-review findings — only report confirmed violations.
+      // Incomplete results are unverified and produce false positives (color-contrast,
+      // link-in-text-block, etc.). We only file bugs when we're 100% sure.
+
+      return findings;
+    } catch (err) {
+      // axe-core can fail on certain page types (e.g., data: URLs, strict CSP) — log and continue
+      console.warn(`  ⚠ axe-core failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  /** Map axe-core category tags to our RuleCategory */
+  private mapAxeCategory(tags: string[]): RuleCategory {
+    for (const tag of tags) {
+      if (AXE_CATEGORY_MAP[tag]) return AXE_CATEGORY_MAP[tag];
+    }
+    return 'adaptable';
+  }
+
+  /** Map axe-core impact to our Severity */
+  private mapAxeSeverity(impact: string): Severity {
+    switch (impact) {
+      case 'critical': return 'critical';
+      case 'serious': return 'serious';
+      case 'moderate': return 'moderate';
+      case 'minor': return 'minor';
+      default: return 'minor';
+    }
+  }
+
+  /** Extract WCAG conformance level from axe tags */
+  private extractWcagLevel(tags: string[]): WcagLevel {
+    for (const tag of tags) {
+      if (tag === 'wcag2aaa') return 'AAA';
+      if (tag === 'wcag2aa' || tag === 'wcag21aa' || tag === 'wcag22aa') return 'AA';
+      if (tag === 'wcag2a' || tag === 'wcag21a') return 'A';
+    }
+    if (tags.includes('best-practice')) return 'AA';
+    return 'A';
+  }
+
+  /** Extract WCAG criterion (e.g., "1.1.1") from axe tags matching "wcag###" */
+  private extractWcagCriterion(tags: string[]): string {
+    for (const tag of tags) {
+      const match = tag.match(/^wcag(\d)(\d)(\d+)$/);
+      if (match) return `${match[1]}.${match[2]}.${match[3]}`;
+    }
+    return '';
+  }
+
+  /**
+   * Deduplicate findings: when axe-core and a hand-rolled check flag the same
+   * issue (equivalent ruleId on the same selector), keep the axe-core finding.
+   */
+  private deduplicateFindings(handRolled: Finding[], axeFindings: Finding[]): Finding[] {
+    // Build a set of axe findings keyed by normalized-ruleId + selector
+    const axeKeys = new Set<string>();
+    for (const f of axeFindings) {
+      axeKeys.add(`${f.ruleId}::${f.selector}`);
+    }
+
+    // Build reverse mapping: axe ruleId → hand-rolled ruleId
+    const axeToHandRolled = new Map<string, string>();
+    for (const [hrId, axeIds] of Object.entries(HANDROLLED_TO_AXE_EQUIV)) {
+      for (const axeId of axeIds) {
+        axeToHandRolled.set(axeId, hrId);
+      }
+    }
+
+    // Filter out hand-rolled findings that have an equivalent axe finding on same selector
+    const filteredHandRolled = handRolled.filter((hr) => {
+      // Check if any axe finding covers this same issue on same selector
+      for (const axeF of axeFindings) {
+        const equivalentHrId = axeToHandRolled.get(axeF.ruleId);
+        if (equivalentHrId === hr.ruleId && axeF.selector === hr.selector) {
+          return false; // Remove hand-rolled, axe-core is more detailed
+        }
+      }
+      return true;
+    });
+
+    return [...filteredHandRolled, ...axeFindings];
   }
 }

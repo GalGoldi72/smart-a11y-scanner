@@ -11,7 +11,7 @@
  */
 
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
-import { ScanConfig, PageResult, PageLink, Finding, DEFAULT_SCAN_CONFIG } from './types.js';
+import { ScanConfig, ScanResult, PageResult, PageLink, Finding, DEFAULT_SCAN_CONFIG } from './types.js';
 import { Crawler } from './crawler.js';
 import { PageAnalyzer } from './page-analyzer.js';
 import { TestCaseImporter } from '../ado/test-case-importer.js';
@@ -25,7 +25,7 @@ import type {
   CoverageGapEntry,
   TestAction,
 } from '../ado/types.js';
-import type { Severity } from '../rules/types.js';
+import type { Severity, WcagLevel } from '../rules/types.js';
 
 /** Internal tracking for which test cases map to which URLs */
 interface UrlTestCaseMap {
@@ -75,8 +75,8 @@ export class HybridScanner {
           height: this.scanConfig.viewportHeight,
         },
         userAgent: this.scanConfig.userAgent,
-        httpCredentials: this.scanConfig.auth
-          ? { username: this.scanConfig.auth.username, password: this.scanConfig.auth.password }
+        httpCredentials: this.scanConfig.auth?.credentials
+          ? { username: this.scanConfig.auth.credentials.username, password: this.scanConfig.auth.credentials.password }
           : undefined,
       });
 
@@ -172,7 +172,12 @@ export class HybridScanner {
           if (page.findings.length === 0) continue;
 
           const relatedTestCaseIds = urlMap[page.url] ?? [];
-          const scanResult = {
+          const scanResult: ScanResult = {
+            url: this.scanConfig.url,
+            scanDate: startedAt,
+            duration: 0,
+            timedOut: false,
+            pagesScanned: 1,
             config: this.scanConfig,
             pages: [page],
             links: [],
@@ -520,18 +525,21 @@ export class HybridScanner {
   private buildPageSummary(page: PageResult) {
     const bySeverity: Record<Severity, number> = {
       critical: 0,
-      major: 0,
+      serious: 0,
+      moderate: 0,
       minor: 0,
-      advisory: 0,
     };
+    const byWcagLevel: Record<WcagLevel, number> = { A: 0, AA: 0, AAA: 0 };
     for (const f of page.findings) {
       bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+      byWcagLevel[f.wcagLevel] = (byWcagLevel[f.wcagLevel] ?? 0) + 1;
     }
     return {
       totalPages: 1,
       totalFindings: page.findings.length,
       bySeverity,
       byCategory: {} as Record<string, number>,
+      byWcagLevel,
     };
   }
 }

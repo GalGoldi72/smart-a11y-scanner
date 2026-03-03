@@ -14,6 +14,7 @@ export type {
   PageLink,
   PageMetadata,
   AdoConfig,
+  AuthConfig,
 } from './scanner/types.js';
 export { DEFAULT_SCAN_CONFIG } from './scanner/types.js';
 

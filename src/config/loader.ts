@@ -89,7 +89,7 @@ function validate(config: ScanConfig): string[] {
     errors.push(`maxPages must be 1–500, got ${config.maxPages}`);
   }
 
-  const validSeverities = ['critical', 'major', 'minor', 'advisory'];
+  const validSeverities = ['critical', 'serious', 'moderate', 'minor'];
   if (!validSeverities.includes(config.minSeverity)) {
     errors.push(`Invalid minSeverity: "${config.minSeverity}"`);
   }

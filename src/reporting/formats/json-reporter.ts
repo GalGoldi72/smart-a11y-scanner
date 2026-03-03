@@ -45,8 +45,34 @@ export function generateJsonReport(
         element: f.selector,
         htmlSnippet: f.htmlSnippet,
         remediation: f.remediation,
+        ...(f.reproSteps?.length ? { reproSteps: f.reproSteps } : {}),
+        ...(f.screenshot ? { screenshot: f.screenshot } : {}),
       })),
     })),
+    ...(result.guidedResults ? {
+      guidedResults: {
+        testPlanSource: result.config.testPlan?.source,
+        summary: {
+          totalSteps: result.guidedResults.totalSteps,
+          successfulSteps: result.guidedResults.successfulSteps,
+          failedSteps: result.guidedResults.failedSteps,
+          totalFindings: result.guidedResults.totalFindings,
+        },
+        stepResults: result.guidedResults.stepResults.map(step => ({
+          stepIndex: step.stepIndex,
+          stepText: step.stepText,
+          success: step.success,
+          action: step.action,
+          urlAfterStep: step.urlAfterStep,
+          findingsAtStep: step.findings.length,
+          explorationFindings: step.explorationFindings.length,
+          ...(step.error ? { error: step.error } : {}),
+          ...(step.adoTestCaseId ? { adoTestCaseId: step.adoTestCaseId } : {}),
+        })),
+      },
+    } : {}),
+    ...((result as any).learningSummary ? { learningSummary: (result as any).learningSummary } : {}),
+    ...((result as any).generationSummary ? { generationSummary: (result as any).generationSummary } : {}),
   };
 
   return options.pretty

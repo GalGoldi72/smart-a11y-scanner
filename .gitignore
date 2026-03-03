@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Scan output — may contain screenshots, internal URLs, tenant IDs
+a11y-reports/
+
+# Learned patterns — may contain site-specific data
+.a11y-patterns/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript incremental compilation
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# AI team (internal dev tooling)
+.ai-team/
+.ai-team-templates/
+.github/agents/

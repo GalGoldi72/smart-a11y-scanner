@@ -295,7 +295,7 @@ export const DEFAULT_CONFIG: DetectionConfig = {
   simulateInteractions: true,
   formTestData: {
     email: 'test@example.com',
-    password: 'TestP@ss123',
+    password: 'Test1234!',
     text: 'Test input',
     search: 'accessibility',
     tel: '+1234567890',

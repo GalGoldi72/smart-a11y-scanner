@@ -14,16 +14,17 @@ import { loadConfig, ConfigValidationError } from './config/loader.js';
 import type { CliOverrides } from './config/loader.js';
 import { ScanEngine } from './scanner/engine.js';
 import { Reporter } from './reporting/reporter.js';
-import type { ScanResult } from './scanner/types.js';
+import type { ScanResult, AuthConfig, TestPlanConfig } from './scanner/types.js';
 import type { Severity } from './rules/types.js';
+import { parseTestPlanUrl } from './scanner/test-plan-parser.js';
 
 const VERSION = '0.1.0';
 
 const SEVERITY_COLORS: Record<Severity, (s: string) => string> = {
   critical: chalk.red.bold,
-  major: chalk.hex('#ea580c'),
-  minor: chalk.yellow,
-  advisory: chalk.blue,
+  serious: chalk.hex('#ea580c'),
+  moderate: chalk.yellow,
+  minor: chalk.blue,
 };
 
 // ── Progress display ────────────────────────────────────────────────
@@ -87,7 +88,7 @@ function printSummary(result: ScanResult): void {
   console.log('');
 
   // Severity breakdown
-  const sevOrder: Severity[] = ['critical', 'major', 'minor', 'advisory'];
+  const sevOrder: Severity[] = ['critical', 'serious', 'moderate', 'minor'];
   for (const sev of sevOrder) {
     const count = s.bySeverity[sev];
     if (count > 0) {
@@ -132,6 +133,25 @@ program
   .option('--ado', 'Enable Azure DevOps bug filing')
   .option('--verbose', 'Verbose output with detailed progress')
   .option('--output-path <dir>', 'Output directory for reports')
+  .option('-t, --timeout <seconds>', 'Overall scan timeout in seconds (default: 600)', parseInt)
+  .option('--auth-url <login-page>', 'URL to navigate to before scanning (for login)')
+  .option('--credentials <user:pass>', 'Basic credentials (user:pass) or set A11Y_SCANNER_CREDENTIALS env var')
+  .option('--headed', 'Show browser window during scan')
+  .option('--interactive-auth', 'Pause for manual login before scanning (implies --headed)')
+  .option('--spa [bool]', 'Discover SPA routes by clicking nav elements (default: true with --interactive-auth)')
+  .option('--test-plan <id-or-url>', 'ADO test plan ID or test management URL')
+  .option('--test-plan-file <path>', 'Path to test plan YAML/JSON file')
+  .option('--steps <steps...>', 'Inline test steps (natural language)')
+  .option('--explore-depth <n>', 'Auto-exploration depth after each guided step (default: 1)', parseInt)
+  .option('--ado-org <url>', 'ADO organization URL (e.g., https://dev.azure.com/msazure)')
+  .option('--ado-project <name>', 'ADO project name')
+  .option('--ado-pat <token>', 'ADO Personal Access Token (or set ADO_PAT env var)')
+  .option('--learn', 'Extract patterns from guided test execution for future generation')
+  .option('--generate', 'Generate new test plans from learned patterns and execute them')
+  .option('--ai-generate', 'Use LLM for edge case generation (requires OPENAI_API_KEY or AZURE_OPENAI_ENDPOINT)')
+  .option('--pattern-dir <path>', 'Directory for pattern storage (default: .a11y-patterns)')
+  .option('--max-generated <n>', 'Maximum generated scenarios (default: 30)', parseInt)
+  .option('--browser <channel>', 'Browser: chromium (default), edge (uses your logged-in Edge profile)')
   .addHelpText('after', `
 ${chalk.bold('Examples:')}
   $ a11y-scan scan https://example.com
@@ -173,12 +193,129 @@ async function runScan(url: string, options: Record<string, unknown>): Promise<v
 
   const config = loadConfig(cliOverrides);
   const verbose = !!options['verbose'];
+  const timeoutSec = (options['timeout'] as number | undefined) ?? 600;
+  const authUrl = options['authUrl'] as string | undefined;
+  const credentialsRaw = (options['credentials'] as string | undefined) ?? process.env['A11Y_SCANNER_CREDENTIALS'];
+  const interactiveAuth = !!options['interactiveAuth'];
+  const headed = !!options['headed'] || interactiveAuth;
+
+  // SPA discovery: explicit --spa flag, or auto-enable with interactive auth or when no test plan
+  const spaFlag = options['spa'];
+  const spaDiscovery = spaFlag === true || spaFlag === 'true'
+    ? true
+    : spaFlag === 'false'
+      ? false
+      : true; // default: always on — smart crawl is the primary mode
+
+  // Build TestPlanConfig from CLI flags
+  const testPlanRaw = options['testPlan'] as string | undefined;
+  const testPlanFile = options['testPlanFile'] as string | undefined;
+  const steps = options['steps'] as string[] | undefined;
+  const exploreDepth = options['exploreDepth'] as number | undefined;
+  const adoOrg = options['adoOrg'] as string | undefined;
+  const adoProject = options['adoProject'] as string | undefined;
+  const adoPat = (options['adoPat'] as string | undefined) ?? process.env['ADO_PAT'];
+
+  // Browser channel
+  const browserRaw = options['browser'] as string | undefined;
+  const browserChannel = browserRaw === 'edge' || browserRaw === 'msedge' ? 'msedge' as const : undefined;
+
+  // Learn / Generate flags
+  const learn = !!options['learn'];
+  const generate = !!options['generate'];
+  const aiGenerate = !!options['aiGenerate'];
+  const patternDir = options['patternDir'] as string | undefined;
+  const maxGenerated = options['maxGenerated'] as number | undefined;
+
+  let testPlanConfig: TestPlanConfig | undefined;
+
+  if (testPlanFile) {
+    testPlanConfig = {
+      source: 'file',
+      filePath: testPlanFile,
+      explorationDepth: exploreDepth,
+    };
+  } else if (steps && steps.length > 0) {
+    testPlanConfig = {
+      source: 'inline',
+      inlineSteps: steps,
+      explorationDepth: exploreDepth,
+    };
+  } else if (testPlanRaw) {
+    // Could be a numeric ID or a full ADO URL
+    const parsed = parseTestPlanUrl(testPlanRaw);
+    if (parsed) {
+      testPlanConfig = {
+        source: 'ado-api',
+        ado: {
+          planId: parsed.planId,
+          suiteIds: parsed.suiteId ? [parsed.suiteId] : undefined,
+          orgUrl: parsed.orgUrl ?? adoOrg,
+          project: parsed.project ?? adoProject,
+          pat: adoPat,
+        },
+        explorationDepth: exploreDepth,
+      };
+    } else {
+      // Treat as numeric plan ID
+      const planId = parseInt(testPlanRaw, 10);
+      if (isNaN(planId)) {
+        console.error(chalk.red('\n✖ --test-plan must be a numeric ID or valid ADO test management URL'));
+        process.exit(2);
+      }
+      testPlanConfig = {
+        source: 'ado-api',
+        ado: {
+          planId,
+          orgUrl: adoOrg,
+          project: adoProject,
+          pat: adoPat,
+        },
+        explorationDepth: exploreDepth,
+      };
+    }
+  }
+
+  // Build AuthConfig from CLI flags
+  let authConfig: AuthConfig | undefined;
+  if (credentialsRaw || authUrl) {
+    authConfig = {};
+    if (authUrl) {
+      authConfig.loginUrl = authUrl;
+    }
+    if (credentialsRaw) {
+      const colonIdx = credentialsRaw.indexOf(':');
+      if (colonIdx === -1) {
+        console.error(chalk.red('\n✖ --credentials must be in user:pass format'));
+        process.exit(2);
+      }
+      authConfig.credentials = {
+        username: credentialsRaw.slice(0, colonIdx),
+        password: credentialsRaw.slice(colonIdx + 1),
+      };
+    }
+  }
 
   // Banner
   console.log('');
   console.log(chalk.bold.cyan('  ♿ Smart A11y Scanner v' + VERSION));
   console.log(chalk.gray(`  Target: ${config.targetUrl}`));
   console.log(chalk.gray(`  Depth: ${config.crawlDepth} | Max pages: ${config.maxPages} | WCAG: ${config.wcagLevel}`));
+  console.log(chalk.gray(`  Timeout: ${timeoutSec}s`));
+  if (authUrl) console.log(chalk.gray(`  Auth URL: ${authUrl}`));
+  if (headed) console.log(chalk.gray(`  Mode: headed (browser visible)`));
+  if (browserChannel) console.log(chalk.gray(`  Browser: Microsoft Edge`));
+  if (interactiveAuth) console.log(chalk.cyan(`  🔐 Interactive auth: browser will open for manual login`));
+  if (spaDiscovery) console.log(chalk.gray(`  Smart crawl: enabled (auto-discovers pages)`));
+  if (testPlanConfig) {
+    const source = testPlanConfig.source === 'file' ? `file: ${testPlanConfig.filePath}`
+      : testPlanConfig.source === 'inline' ? `${testPlanConfig.inlineSteps?.length} inline steps`
+      : `ADO plan #${testPlanConfig.ado?.planId}`;
+    console.log(chalk.cyan(`  📋 Test plan: ${source}`));
+  }
+  if (learn) console.log(chalk.cyan('  📚 Learning: patterns will be extracted and saved'));
+  if (generate) console.log(chalk.cyan('  🧪 Generation: AI will create new test scenarios'));
+  if (aiGenerate) console.log(chalk.cyan('  🤖 LLM generation: edge cases via AI'));
   console.log('');
 
   // Run scan
@@ -192,6 +329,22 @@ async function runScan(url: string, options: Record<string, unknown>): Promise<v
     maxDepth: config.crawlDepth,
     maxPages: config.maxPages,
     pageTimeoutMs: config.pageTimeout,
+    timeout: timeoutSec * 1000,
+    headless: !headed,
+    interactiveAuth,
+    spaDiscovery,
+    ...(browserChannel ? { browserChannel } : {}),
+    ...(authConfig ? { auth: authConfig } : {}),
+    ...(testPlanConfig ? { testPlan: testPlanConfig } : {}),
+    // Learn/Generate flags — types added to ScanConfig by Naomi (concurrent)
+    ...(learn || generate || aiGenerate ? {
+      learn,
+      generate,
+      aiGenerate,
+      ...(patternDir ? { patternDir } : {}),
+      ...(maxGenerated !== undefined ? { maxGenerated } : {}),
+      captureScreenshots: learn || undefined,
+    } as Record<string, unknown> : {}),
   });
 
   const result = await engine.run();
@@ -212,11 +365,25 @@ async function runScan(url: string, options: Record<string, unknown>): Promise<v
 
   console.log('');
   console.log(chalk.bold('  📄 Reports generated:'));
+  let htmlReportPath: string | undefined;
   for (const artifact of artifacts) {
     const size = artifact.sizeBytes >= 1024
       ? `${(artifact.sizeBytes / 1024).toFixed(1)} KB`
       : `${artifact.sizeBytes} bytes`;
     console.log(`    ${chalk.green('✔')} ${artifact.format.toUpperCase().padEnd(5)} → ${artifact.filePath} (${size})`);
+    if (artifact.format === 'html') htmlReportPath = artifact.filePath;
+  }
+
+  // Auto-open the HTML report in the default browser
+  if (htmlReportPath) {
+    try {
+      const { exec } = await import('child_process');
+      const openCmd = process.platform === 'win32' ? `start "" "${htmlReportPath}"`
+        : process.platform === 'darwin' ? `open "${htmlReportPath}"`
+        : `xdg-open "${htmlReportPath}"`;
+      exec(openCmd);
+      console.log(`    ${chalk.cyan('🌐')} Opening report in browser...`);
+    } catch { /* non-fatal */ }
   }
 
   // ADO bug filing placeholder

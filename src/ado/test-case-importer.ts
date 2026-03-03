@@ -41,9 +41,13 @@ export class TestCaseImporter {
     this.config = config;
     this.apiVersion = config.apiVersion ?? '7.0';
 
-    const token = Buffer.from(`:${config.pat}`).toString('base64');
+    // Support both PAT (Basic) and Azure CLI JWT (Bearer) auth
+    const isJwt = config.pat.startsWith('eyJ');
+    const authHeader = isJwt
+      ? `Bearer ${config.pat}`
+      : `Basic ${Buffer.from(`:${config.pat}`).toString('base64')}`;
     const baseHeaders = {
-      Authorization: `Basic ${token}`,
+      Authorization: authHeader,
       'Content-Type': 'application/json',
     };
 
@@ -277,7 +281,7 @@ export class TestCaseImporter {
         index: steps.length,
         action,
         expectedResult,
-        actionText: this.stripHtml(action),
+        actionText: this.cleanActionText(this.stripHtml(action)),
         expectedResultText: this.stripHtml(expectedResult),
       });
     }
@@ -285,18 +289,14 @@ export class TestCaseImporter {
     return steps;
   }
 
-  /** Strip HTML tags to plain text */
+  /** Strip HTML tags to plain text — delegates to exported function */
   private stripHtml(html: string): string {
-    return html
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    return stripHtml(html);
+  }
+
+  /** Clean action text — delegates to exported function */
+  private cleanActionText(text: string): string {
+    return cleanActionText(text);
   }
 
   // -------------------------------------------------------------------------
@@ -475,16 +475,16 @@ export class TestCaseImporter {
     const criterionMap: Array<{ keywords: string[]; criterion: string; severity: Severity }> = [
       { keywords: ['screen reader', 'announce', 'read aloud', 'accessible name'], criterion: '4.1.2', severity: 'critical' },
       { keywords: ['keyboard', 'tab', 'focus', 'focusable'], criterion: '2.1.1', severity: 'critical' },
-      { keywords: ['contrast', 'color', 'readable'], criterion: '1.4.3', severity: 'major' },
+      { keywords: ['contrast', 'color', 'readable'], criterion: '1.4.3', severity: 'serious' },
       { keywords: ['alt text', 'alternative text', 'image description'], criterion: '1.1.1', severity: 'critical' },
       { keywords: ['heading', 'heading level', 'h1', 'h2'], criterion: '1.3.1', severity: 'minor' },
       { keywords: ['label', 'form label', 'input label'], criterion: '1.3.1', severity: 'critical' },
-      { keywords: ['aria', 'role', 'aria-label', 'aria-live'], criterion: '4.1.2', severity: 'major' },
-      { keywords: ['zoom', 'reflow', 'responsive', 'magnif'], criterion: '1.4.10', severity: 'major' },
-      { keywords: ['error', 'validation', 'error message'], criterion: '3.3.1', severity: 'major' },
-      { keywords: ['language', 'lang attribute'], criterion: '3.1.1', severity: 'major' },
-      { keywords: ['skip', 'skip link', 'bypass'], criterion: '2.4.1', severity: 'major' },
-      { keywords: ['timeout', 'time limit', 'session'], criterion: '2.2.1', severity: 'major' },
+      { keywords: ['aria', 'role', 'aria-label', 'aria-live'], criterion: '4.1.2', severity: 'serious' },
+      { keywords: ['zoom', 'reflow', 'responsive', 'magnif'], criterion: '1.4.10', severity: 'serious' },
+      { keywords: ['error', 'validation', 'error message'], criterion: '3.3.1', severity: 'serious' },
+      { keywords: ['language', 'lang attribute'], criterion: '3.1.1', severity: 'serious' },
+      { keywords: ['skip', 'skip link', 'bypass'], criterion: '2.4.1', severity: 'serious' },
+      { keywords: ['timeout', 'time limit', 'session'], criterion: '2.2.1', severity: 'serious' },
     ];
 
     for (const entry of criterionMap) {
@@ -505,12 +505,17 @@ export class TestCaseImporter {
   private extractUrls(text: string): string[] {
     if (!text) return [];
     const urlRegex = /https?:\/\/[^\s<>"')\]]+/gi;
-    return [...(text.match(urlRegex) ?? [])];
+    return [...(text.match(urlRegex) ?? [])].map(u => this.cleanUrlEntities(u));
   }
 
   private extractFirstUrl(text: string): string | null {
     const urls = this.extractUrls(text);
     return urls.length > 0 ? urls[0] : null;
+  }
+
+  /** Decode HTML entities in URLs — delegates to exported function */
+  private cleanUrlEntities(url: string): string {
+    return cleanUrlEntities(url);
   }
 
   // -------------------------------------------------------------------------
@@ -530,4 +535,58 @@ export class TestCaseImporter {
       ? { id: firstSuite.id, name: firstSuite.name }
       : { id: 0, name: 'Unknown' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Exported utility functions (testable without instantiating classes)
+// ---------------------------------------------------------------------------
+
+/** Strip HTML tags to plain text — decode entities FIRST, loop until stable */
+export function stripHtml(html: string): string {
+  let text = html;
+  let prev = '';
+  while (text !== prev) {
+    prev = text;
+    text = text
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/&nbsp;/gi, ' ');
+    text = text.replace(/<[^>]+>/g, '');
+  }
+  return text.replace(/[<>]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Clean action text by removing trailing expected-result phrases.
+ * ADO steps sometimes embed the expected result in the action's HTML.
+ */
+export function cleanActionText(text: string): string {
+  const resultPhrases = [
+    /\s*(?:related|the)\s+page\s+(?:will|should|is)\s+/i,
+    /\s*(?:page|screen|dialog|blade|panel)\s+(?:will|should|is)\s+(?:display|show|appear|load|open)/i,
+    /\s*(?:verify|ensure|confirm|check|validate|assert)\s+that?\s+/i,
+    /\s*(?:expected|the\s+expected)\s+(?:result|outcome|behavior)\s*/i,
+    /\s*(?:it\s+should|should\s+be|must\s+be)\s+/i,
+    /\s*(?:user\s+(?:should|will|can)\s+(?:see|hear|find))\s+/i,
+  ];
+  for (const pattern of resultPhrases) {
+    const match = text.match(pattern);
+    if (match && match.index && match.index > 10) {
+      return text.substring(0, match.index).trim();
+    }
+  }
+  return text;
+}
+
+/** Decode HTML entities that survive in URLs from ADO XML step content */
+export function cleanUrlEntities(url: string): string {
+  return url
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
 }

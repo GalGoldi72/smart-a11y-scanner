@@ -40,9 +40,9 @@ export interface IADOClient {
 
 const SEVERITY_MAP: Record<Severity, string> = {
   critical: '1 - Critical',
-  major: '2 - High',
-  minor: '3 - Medium',
-  advisory: '4 - Low',
+  serious: '2 - High',
+  moderate: '3 - Medium',
+  minor: '4 - Low',
 };
 
 /** Result of filing a single bug (used by engine-level batch filing) */
@@ -154,7 +154,7 @@ export class AdoClient implements IADOClient {
             title,
             description: this.buildDescription(findings),
             reproSteps: this.buildReproSteps(pageUrl, findings),
-            priority: primary.severity === 'critical' ? 1 : primary.severity === 'major' ? 2 : 3,
+            priority: primary.severity === 'critical' ? 1 : primary.severity === 'serious' ? 2 : 3,
             severity: SEVERITY_MAP[primary.severity],
             tags: this.config.tags || ['Accessibility'],
           });

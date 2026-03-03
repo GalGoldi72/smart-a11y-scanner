@@ -9,28 +9,32 @@
 export type WcagLevel = 'A' | 'AA' | 'AAA';
 
 /** Impact severity of a rule violation */
-export type Severity = 'critical' | 'major' | 'minor' | 'advisory';
+export type Severity = 'critical' | 'serious' | 'moderate' | 'minor';
 
 /** Whether the check can run on static HTML or needs a live browser */
-export type AnalysisMode = 'static' | 'browser' | 'both';
+export type AnalysisMode = 'static' | 'browser' | 'both' | 'manual';
+
+/** How automatable a rule check is */
+export type AutomationLevel = 'full' | 'partial' | 'manual';
 
 /** High-level categories that group related rules */
 export type RuleCategory =
-  | 'aria'
-  | 'color-contrast'
-  | 'zoom-reflow'
+  | 'images'
+  | 'multimedia'
+  | 'adaptable'
+  | 'distinguishable'
   | 'keyboard'
-  | 'screen-reader'
-  | 'voice-access'
-  | 'forms'
-  | 'media'
-  | 'semantic-html'
-  | 'motion'
-  | 'language-text'
-  | 'navigation-structure'
   | 'timing'
-  | 'error-handling'
-  | 'authentication';
+  | 'seizures'
+  | 'navigable'
+  | 'input-modalities'
+  | 'readable'
+  | 'predictable'
+  | 'input-assistance'
+  | 'compatible'
+  | 'aria'
+  | 'forms'
+  | 'screen-reader';
 
 /** A single WCAG success criterion reference */
 export interface WcagReference {
@@ -62,11 +66,12 @@ export interface AccessibilityRule {
   selectorHints: string[];
   /** Whether static HTML analysis suffices or a live browser is needed */
   analysisMode: AnalysisMode;
-  /** Tags for filtering (e.g. "new-in-2.2", "automated", "semi-automated") */
+  /** Algorithm hint for the engine — describes HOW to check this rule */
+  checkFunction: string;
+  /** How automatable this check is */
+  automationLevel: AutomationLevel;
+  /** Tags for filtering (e.g. "new-in-2.2", "wcag21", "best-practice") */
   tags: string[];
-  /** If true, the rule can be fully evaluated by automation.
-   *  If false, the scanner can flag candidates but a human must confirm. */
-  fullyAutomatable: boolean;
 }
 
 /** The complete rule catalog exported by this module */

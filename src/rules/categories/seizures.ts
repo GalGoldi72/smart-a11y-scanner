@@ -1,0 +1,63 @@
+/**
+ * Seizures and physical reactions rules — WCAG 2.3.x
+ */
+import { AccessibilityRule } from '../types.js';
+
+export const seizureRules: AccessibilityRule[] = [
+  {
+    id: 'three-flashes-below-threshold',
+    category: 'seizures',
+    title: 'Content must not flash more than 3 times per second',
+    description: 'No content may flash more than 3 times per second, or the flash must be below general and red flash thresholds.',
+    wcagReferences: [{ criterion: '2.3.1', name: 'Three Flashes or Below Threshold', level: 'A' }],
+    severity: 'critical',
+    remediation: 'Remove or slow down flashing content. Ensure flash frequency stays below 3 Hz. Reduce the flashing area.',
+    selectorHints: ['[class*="flash"]', '[class*="blink"]', 'blink'],
+    analysisMode: 'browser',
+    checkFunction: 'Capture screenshots over 1-second intervals. Analyze pixel luminance changes. Count flash transitions per second. Flag areas > 21,824 sq px flashing > 3 times/sec.',
+    automationLevel: 'partial',
+    tags: ['semi-automated', 'needs-browser'],
+  },
+  {
+    id: 'three-flashes',
+    category: 'seizures',
+    title: 'Content must not flash more than 3 times per second (strict)',
+    description: 'No content should flash more than 3 times per second, period.',
+    wcagReferences: [{ criterion: '2.3.2', name: 'Three Flashes', level: 'AAA' }],
+    severity: 'critical',
+    remediation: 'Remove all flashing content or reduce to fewer than 3 flashes per second.',
+    selectorHints: ['[class*="flash"]', '[class*="blink"]'],
+    analysisMode: 'browser',
+    checkFunction: 'Same as three-flashes-below-threshold but with no exceptions — all flashing above 3 Hz is flagged.',
+    automationLevel: 'partial',
+    tags: ['semi-automated', 'needs-browser', 'aaa'],
+  },
+  {
+    id: 'animation-from-interactions',
+    category: 'seizures',
+    title: 'Motion animation from interactions must be disableable',
+    description: 'Motion animation triggered by interaction can be disabled, unless essential for functionality.',
+    wcagReferences: [{ criterion: '2.3.3', name: 'Animation from Interactions', level: 'AAA' }],
+    severity: 'minor',
+    remediation: 'Respect prefers-reduced-motion media query. Provide a UI toggle to disable animations.',
+    selectorHints: ['[class*="animate"]', '[style*="animation"]', '[style*="transition"]'],
+    analysisMode: 'browser',
+    checkFunction: 'Check if CSS respects @media (prefers-reduced-motion: reduce). Detect elements with CSS animations/transitions. Verify a mechanism to disable animations exists.',
+    automationLevel: 'partial',
+    tags: ['semi-automated', 'wcag21', 'needs-browser'],
+  },
+  {
+    id: 'prefers-reduced-motion',
+    category: 'seizures',
+    title: 'Site must respect prefers-reduced-motion',
+    description: 'CSS should include @media (prefers-reduced-motion: reduce) to disable or reduce animations.',
+    wcagReferences: [{ criterion: '2.3.3', name: 'Animation from Interactions', level: 'AAA' }],
+    severity: 'minor',
+    remediation: 'Add @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }',
+    selectorHints: ['*'],
+    analysisMode: 'browser',
+    checkFunction: 'Set prefers-reduced-motion: reduce via Playwright emulation. Check if animated elements still animate. Verify CSS contains the media query.',
+    automationLevel: 'full',
+    tags: ['automated', 'best-practice', 'needs-browser'],
+  },
+];
