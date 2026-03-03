@@ -2010,3 +2010,742 @@ Both reporters use `(result as any).learningSummary` / `(result as any).generati
 - ✅ All 43 tests pass
 - No new tests added (these are display-only sections; data flows from engine)
 
+
+
+---
+
+## Finding Deduplication (engine-level)
+
+**Decision by:** Naomi (Backend Dev)
+**Date:** 2026-02-24
+
+### Problem
+Scanner visits the same page state multiple times (popups, navigation back) and re-discovers identical violations. A scan producing 90 findings had only ~15 unique ones.
+
+### Solution
+Added `deduplicateFindings()` to `ScanEngine` in `src/scanner/engine.ts`. Runs after all pages are collected, before `buildResult()`.
+
+- **Dedup key:** `ruleId + '|' + selector` (falls back to `ruleId + '|' + htmlSnippet` when selector is empty)
+- **First-wins:** Keeps the first occurrence per key
+- **Scope:** Cross-page global dedup via a `Set<string>`
+- **Logging:** Deduplicated: original to unique findings (removed duplicates removed)
+
+### Files Changed
+- `src/scanner/engine.ts` - Added `deduplicateFindings()` private method
+
+
+# HTML Report Filter Toolbar & Severity View
+
+**By:** Alex
+**Date:** 2026-02-24
+
+## What
+Added client-side filter toolbar and view toggle to the HTML report's Detailed Findings section:
+- **Severity filter:** toggle buttons for critical/serious/moderate/minor — all ON by default, clicking toggles visibility
+- **Category filter:** toggle buttons for each unique category found in findings — all ON by default
+- **Live counter:** "Showing X of Y findings" updates on every filter change
+- **View toggle:** "By Page" (grouped by page, existing layout) vs "By Severity" (flat list, all findings sorted globally critical→minor). Severity view shows page-origin label on each card.
+- Empty page sections auto-hide when all their findings are filtered out.
+- Filter toolbar is sticky (`position: sticky; top: 0; z-index: 100`).
+- Hidden in `@media print`.
+
+## Why
+User requested category and severity filters, plus global severity ordering. The report can have hundreds of findings — filters let users focus on what matters (e.g. "show me only critical color-contrast issues"). The "By Severity" view provides a triage-friendly flat list regardless of which page findings came from.
+
+## Impact
+- **html-reporter.ts:** New functions `buildFilterToolbar()`, `buildSeverityView()`. `buildFindingCard()` gained optional `pageLabel?: string` parameter. New CSS classes with `filter-`, `sv-`, `view-` prefixes. New client-side JS in `buildScript()`.
+- **No impact on other reporters** (JSON, CSV) or scanner engine.
+- **No new dependencies** — pure vanilla JS, self-contained HTML.
+
+# Decision: TestPlanGenerator — 4 Heuristic Strategies
+
+**Author:** Bobbie (UI Expert)
+**Date:** 2025-07-25
+**Status:** Implemented
+
+## Context
+
+Phase 3 of the LEARN → INVENT pipeline needs a TestPlanGenerator that takes `LearnedPatterns` from PatternExtractor and produces `GeneratedTestScenario[]` that feed back into GuidedExplorer for a second autonomous round.
+
+## Decisions
+
+### 1. Types Placement
+Created `src/scanner/patterns/types.ts` as the canonical type source for the patterns module. Naomi's PatternExtractor will import from the same file. Types match the architecture in `decisions.md` exactly.
+
+### 2. Strategy Architecture
+Each strategy is a private method returning `GeneratedTestScenario[]`. The `generate()` method runs them in sequence, caps per-strategy at `maxPerStrategy`, filters by `minConfidence`, and caps total at `maxTotal`. Strategies are stateless — no shared mutable state between them.
+
+### 3. Structural Similarity Algorithm
+Cross-page transfer uses Jaccard similarity (intersection/union) on:
+- Landmark roles (40% weight)
+- Heading depth levels (20% weight)
+- Element group roles (40% weight)
+
+Threshold: 0.7 for transfer. This is deliberately conservative — false positives (generating broken tests for dissimilar pages) are worse than false negatives (missing a transferable page).
+
+### 4. Label Mapping Strategy
+Cross-page transfer maps element labels by *positional index* within matched element groups. This works well for pages built from the same template (e.g., /recommendations and /incidents with the same tab bar layout). Semantic label matching (e.g., NLP similarity) deferred to Phase 5 LLM integration.
+
+### 5. Role Interaction Map
+`ROLE_INTERACTION_MAP` maps ARIA roles to default interaction types. This is the single source of truth for "how do you interact with a checkbox?" → click/toggle. Extensible for new roles.
+
+### 6. Edge Cases Stubbed
+Strategy 5 (`edge-case-generation`) returns `[]`. It requires LLMClient which is Phase 5 scope.
+
+## Files Changed
+- `src/scanner/patterns/types.ts` (new)
+- `src/scanner/patterns/test-plan-generator.ts` (new)
+
+## Risks
+- Positional label mapping may break for pages with different element counts in matched groups — will need fuzzy matching later.
+- `getSetupActions()` only extracts navigate/wait steps before the first interaction — complex multi-step setups (click A, then click B, then test C) won't be fully reconstructed from interaction patterns alone.
+
+### 2026-02-24: User directive — evidence-backed findings only
+**By:** GalGoldi72 (via Copilot)
+**What:** Every finding must be backed up with evidence (code snippet or screenshot). No assumptions — only report what the scanner can prove.
+**Why:** User request — captured for team memory
+
+### 2026-02-24: User directive — suppress unconfirmed contrast findings
+**By:** GalGoldi72 (via Copilot)
+**What:** Do not report color-contrast findings unless the scanner can confirm the issue with certainty. Axe-core "incomplete" (needs-review) contrast checks should be excluded from results entirely.
+**Why:** User request — too many false positives on contrast checks where axe-core cannot determine actual colors (gradients, transparent backgrounds, CSS variables). Only confirmed violations should appear.
+
+# Decision: Dynamic Accessibility Checks Architecture
+
+**Date:** 2026-02-24  
+**Author:** Drummer (Accessibility Expert)  
+**Status:** Proposal (Awaiting Team Review)  
+**Requested by:** GalGoldi72 — "I don't see in the live test a check for zoom, scale and other important checks. Is this because of the timeout?"
+
+## Problem Statement
+
+User observed that the live accessibility scanner does not test:
+- Zoom at 200% (text readability, no horizontal scrolling)
+- Text reflow at 320px (mobile responsiveness)
+- Text spacing tolerance (letter/word/line/paragraph spacing)
+- Display orientation (portrait ↔ landscape)
+- Keyboard navigation (Tab, focus traps, focus visibility)
+- Motion/animation tolerance (prefers-reduced-motion, flashing)
+- Touch target sizes
+
+These are **required checks** under WCAG 2.1 AA (Microsoft's stated compliance target) but cannot be performed by axe-core's static DOM analysis alone.
+
+**Root cause:** Axe-core is excellent for static issues (missing alt text, heading hierarchy, etc.) but **cannot simulate browser manipulation** (viewport resize, zoom, keyboard input, screenshots for comparison).
+
+## Solution: Dynamic Check Architecture
+
+Add a new **DynamicAnalyzer** module that runs Playwright-based checks **after** axe-core's static analysis:
+
+```
+PageAnalyzer (current)
+├─ axe-core checks (static DOM)
+└─ hand-rolled color contrast, form labels, etc.
+
+NEW: DynamicAnalyzer (proposed)
+├─ Zoom & Reflow (1.4.4, 1.4.10)
+├─ Text Spacing (1.4.12)
+├─ Orientation (1.3.4)
+├─ Keyboard & Focus (2.1.1, 2.1.2, 2.4.7, 2.4.11)
+├─ Motion & Animation (2.3.1, 2.3.3)
+└─ Touch Targets (2.5.8)
+```
+
+### Implementation Strategy
+
+1. **Create `src/scanner/dynamic-analyzer.ts`**
+   - New class with async `analyze(page, url)` method
+   - Each WCAG criterion → one check method
+   - Reuses `PageResult` and `Finding` types
+
+2. **Integrate into `PageAnalyzer`**
+   - Call `DynamicAnalyzer` after axe-core checks
+   - Mark findings with `dynamic: true` for filtering/reporting
+   - Gracefully degrade if timeout approaching
+
+3. **Config flag: `enableDynamicChecks`**
+   - Default: `false` (opt-in, slower scans)
+   - Can be enabled via `ScanConfig.dynamicChecks: true`
+
+4. **Performance gates:**
+   - Each check has 2-second timeout
+   - Skip remaining checks if global scan timeout within 10 seconds
+   - Report `timedOut: true` on `ScanResult`
+
+### Scope: 8 Dynamic Checks (Phase 2)
+
+| Check | WCAG | Priority | Complexity | Est. Time |
+|---|---|---|---|---|
+| Text resize 200% | 1.4.4 | P0 | Medium | 2 sec |
+| Reflow at 320px | 1.4.10 | P0 | Medium | 2 sec |
+| Text spacing tolerance | 1.4.12 | P0 | Medium | 2 sec |
+| Orientation support | 1.3.4 | P0 | Medium | 2 sec |
+| Keyboard navigation (Tab) | 2.1.1 | P0 | Hard | 3 sec |
+| No keyboard trap | 2.1.2 | P0 | Hard | 3 sec |
+| Focus visible indicator | 2.4.7 | P0 | Hard | 4 sec |
+| Focus not obscured (CSS) | 2.4.11 | P0 | Hard | 2 sec |
+| Flashing content | 2.3.1 | P0 | Hard | 2 sec |
+| Prefers-reduced-motion | 2.3.3 | P1 | Medium | 2 sec |
+| Target size minimum 24×24 | 2.5.8 | P0 | Medium | 2 sec |
+| Form labels | 3.3.2 | P0 | Simple | 1 sec |
+
+**Estimated total for all 12 checks (parallelized):** ~30 seconds per page  
+**Recommended subset (P0 only, critical):** ~20 seconds per page
+
+## Trade-offs
+
+### ✅ Benefits
+- **Comprehensive:** Covers 11 of 13 WCAG 2.1 AA criteria (85% coverage)
+- **Accurate:** Simulates real browser behavior (not static analysis)
+- **Evidence-based:** Captures screenshots + reproSteps for manual verification
+- **Microsoft-aligned:** Directly addresses WCAG 2.1 AA compliance
+- **Phased:** Can opt-in; doesn't break existing scans
+
+### ⚠️ Costs
+| Cost | Impact | Mitigation |
+|---|---|---|
+| **Scan time +30 sec** | Longer waits for users | Make optional; document as "detailed scan" |
+| **Image lib size** | +50-100KB dependencies | Lazy-load only if dynamic checks enabled |
+| **Screenshot memory** | High RAM if many findings | Write to disk, cleanup after analysis |
+| **False positives** | May flag responsive design | Whitelist common patterns; document exceptions |
+| **Timeout risk** | Partial results if slow network | Degrade gracefully; report `timedOut` flag |
+
+## Implementation Timeline
+
+| Phase | Duration | Deliverables |
+|---|---|---|
+| **2A: Core zoom/reflow** | Week 1-2 | `checkTextResize200Percent`, `checkReflowMobile`, unit tests |
+| **2B: Keyboard** | Week 3-4 | Tab nav, trap detection, focus visibility (with screenshot lib) |
+| **2C: Motion** | Week 5-6 | Flashing detection, reduced-motion, target size |
+| **2D: Polish** | Week 7 | Reporting, screenshots, reproSteps, perf optimization |
+| **2E: Testing** | Week 8 | Integration tests, real-world sites, false positive reduction |
+
+## Dependencies
+
+Add to `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@axe-core/playwright": "^4.x",
+    "playwright": "^1.x"
+  },
+  "optionalDependencies": {
+    "pixelmatch": "^5.3.0",
+    "sharp": "^0.33.0"
+  }
+}
+```
+
+- `pixelmatch`: For focus visibility (image diff)
+- `sharp`: For flash detection (luminance analysis)
+- Both optional; gracefully skip if not installed
+
+## Config Changes
+
+Add to `ScanConfig` type (in `src/scanner/types.ts`):
+
+```typescript
+interface ScanConfig {
+  // ... existing fields
+  
+  dynamicChecks?: {
+    enabled: boolean;          // Default: false
+    includeFlashing?: boolean; // Default: true
+    includeMotion?: boolean;   // Default: true
+    timeoutPerCheck?: number;  // ms, default: 2000
+  };
+}
+```
+
+## API Contract
+
+```typescript
+// In PageAnalyzer.analyze()
+if (this.config.dynamicChecks?.enabled) {
+  const dynamicAnalyzer = new DynamicAnalyzer(this.config);
+  const dynamicFindings = await dynamicAnalyzer.analyze(page, url);
+  
+  // Mark findings as dynamic for filtering
+  dynamicFindings.forEach(f => f.dynamic = true);
+  findings.push(...dynamicFindings);
+}
+```
+
+## Testing Strategy
+
+1. **Unit tests:** Mock page object, verify check logic
+2. **Integration tests:** Real pages (W3C, Microsoft, internal test sites)
+3. **Regression tests:** Ensure axe-core findings unchanged
+4. **Performance tests:** Measure check duration, memory usage
+5. **False positive audit:** Manual review of N=50 findings, target <10% error rate
+
+## Approval Checklist
+
+- [ ] Team reviews timing impact (is +30 sec acceptable for opt-in?)
+- [ ] Naomi approves dependencies (pixelmatch, sharp)
+- [ ] Alex confirms reporters can display `dynamic: true` findings
+- [ ] Holden aligns with Phase 2 roadmap (vs. other priorities)
+- [ ] GalGoldi72 confirms this addresses user request
+
+## Success Criteria
+
+✅ **Functional:**
+- All 12 checks run successfully on test sites
+- < 10% false positive rate (peer review)
+- Findings include reproSteps and optional screenshots
+
+✅ **Performance:**
+- Dynamic checks optional (opt-in)
+- Each check completes in < 2 sec (except focus visibility, ~4 sec)
+- Graceful degradation if scan timeout approaching
+
+✅ **Reporting:**
+- HTML/JSON reports show dynamic findings
+- Mark dynamic findings separately (color coding, badge)
+- Include remediation guidance per WCAG criterion
+
+---
+
+## Questions for Team
+
+1. **Should dynamic checks be ON by default, or opt-in only?**
+   - Current proposal: opt-in (safety, avoid long scans)
+   - Alternative: on for AA mode, off for quick scan
+
+2. **Screenshot storage: inline (base64) or external?**
+   - Current proposal: base64 (self-contained report)
+   - Risk: Large HTML files; mitigation: compress, lazy-load
+
+3. **Which image libraries?** (pixelmatch vs. OpenCV vs. custom?)
+   - pixelmatch: lightweight, simple
+   - sharp: production-grade, but heavier
+   - Proposal: use both; pixelmatch for focus (small diffs), sharp for flashing (full page)
+
+4. **Flash detection scope:**
+   - Should we test full 2 seconds, or sample first 1 second?
+   - Proposal: 2 seconds (safer for seizure risk)
+
+---
+
+*Document status: Ready for team discussion*  
+*Next step: Holden schedules sync with team to approve Phase 2 scope*
+
+# Decision Proposal: Microsoft Accessibility Standard Alignment
+
+**Proposed by:** Drummer (Accessibility Expert)
+**Date:** 2026-02-24
+**Status:** Proposed
+**Affects:** page-analyzer.ts, Finding type, HTML reporter, ADO bug creator, scanner config
+
+---
+
+## Context
+
+We scanned security.microsoft.com and got 1,081 findings. Analysis revealed that **93% (1,008) are axe-core "incomplete" checks** (needs manual review), not confirmed violations. Our scanner currently treats all of these as equivalent bugs, which floods results with noise and destroys credibility.
+
+Additionally, our axe-core tag configuration includes AAA-level and best-practice rules mixed in with required standards, making it impossible to distinguish compliance failures from aspirational improvements.
+
+---
+
+## Decisions Proposed
+
+### Decision 1: Default axe-core tags — WCAG 2.1 AA Only
+
+**Change the default tag set from:**
+```typescript
+['wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice']
+```
+
+**To:**
+```typescript
+['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
+```
+
+**Rationale:** Microsoft targets WCAG 2.1 Level AA (confirmed via Microsoft Conformance Reports, Fluent 2 Design System, and Accessibility Insights). AAA is aspirational — no major organization requires it. Best-practice rules are not WCAG requirements.
+
+**Optional presets** (user-selectable, off by default):
+- `best-practice` — Advisory suggestions
+- `wcag2aaa` — Enhanced accessibility (aspirational)
+- `section508` — US federal government compliance
+- `EN-301-549` — European standard compliance
+- `TTv5` — Trusted Tester v5 (DHS methodology, used by Microsoft)
+
+### Decision 2: Three-Tier Finding Classification
+
+Findings must be classified into three tiers based on axe-core result type:
+
+| Tier | Source | Report As | ADO Work Item |
+|------|--------|-----------|---------------|
+| **Violation** | `results.violations` | Bug (confirmed failure) | Bug |
+| **Needs Review** | `results.incomplete` | Manual review item | Task |
+| **Suggestion** | best-practice rules | Advisory | Task (low priority) |
+
+**Implementation:** Add `reportingTier: 'violation' | 'needs-review' | 'suggestion'` and `needsReview: boolean` to the `Finding` type.
+
+### Decision 3: Severity Downgrade for Incomplete Findings
+
+Incomplete findings (needs-review) should have their severity downgraded because they are unconfirmed:
+
+- critical/serious impact → **moderate** severity
+- moderate/minor impact → **minor** severity
+
+This prevents unconfirmed findings from competing with real violations for attention.
+
+### Decision 4: AAA Findings Off By Default
+
+AAA-level rules should be:
+- **Off by default** in scanner configuration
+- Available as an opt-in preset: `{ enableAAA: true }`
+- When enabled, AAA violations are downgraded one severity level (they're aspirational, not required)
+
+### Decision 5: Best-Practice Findings as Separate Tier
+
+Best-practice findings should be:
+- **Off by default** in scanner configuration
+- Available as opt-in: `{ enableBestPractice: true }`
+- When enabled, reported in a separate "Suggestions" section
+- Never filed as ADO Bugs — always Tasks
+- Maximum severity: moderate (regardless of axe-core impact)
+
+---
+
+## Impact Analysis
+
+### On security.microsoft.com scan (1,081 findings → ~73 actionable bugs):
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Confirmed bugs | 1,081 (all treated equally) | ~73 (violations only) |
+| Review items | 0 (mixed in with bugs) | ~1,008 (separate section) |
+| Signal-to-noise ratio | ~7% real violations | ~100% real violations in bug tier |
+| AAA noise | Included | Excluded by default |
+| Best-practice noise | Included | Excluded by default |
+
+### Files requiring changes:
+- `src/scanner/page-analyzer.ts` — Separate violation/incomplete processing, add tier classification
+- `src/scanner/types.ts` — Add `reportingTier`, `needsReview` to Finding type
+- `src/rules/types.ts` — May need `ReportingTier` type
+- HTML reporter — Separate sections per tier
+- ADO bug creator — Bug vs Task based on tier
+- Scanner config — Add `enableAAA`, `enableBestPractice`, `tagPresets` options
+
+---
+
+## Who needs to weigh in:
+- **Holden** (Lead) — Architecture approval for tier system
+- **Naomi** (Backend) — page-analyzer.ts changes
+- **Alex** (Frontend) — HTML reporter changes
+- **Avasarala** (PM) — Default behavior affects user experience
+
+# Decision: Voice Access & NVDA Screen Reader Integration
+
+**Date:** 2026-02-25  
+**Author:** Drummer (Accessibility Expert)  
+**Stakeholder:** GalGoldi72 (Product Owner)  
+**Status:** PROPOSED — Awaiting team review
+
+---
+
+## Problem Statement
+
+The Smart A11y Scanner currently covers **static DOM analysis** (axe-core) and is planning **dynamic browser checks** (Phase 2, Playwright zoom/keyboard/focus). However, **assistive technology compatibility**—specifically Windows Voice Access and NVDA screen reader—is not addressed.
+
+### Why This Matters
+
+- **Windows Voice Access** users rely on visible labels and click targets. Mismatched labels cause voice commands to fail silently.
+- **NVDA screen reader** users (free, most popular on Windows) need proper ARIA, landmark regions, and live regions.
+- **Microsoft accessibility standard** (WCAG 2.1 AA) requires both voice and screen reader support.
+- **Market data:** 19% of US population has a disability (CDC); screen readers are mainstream, not niche.
+
+### Current Gap
+
+- Axe-core covers ~40% of screen reader compatibility (ARIA roles, names, forms)
+- **Missing:** Voice access label matching, target size validation, live region content updates, reading order verification, skip links
+- **Not attempted:** Screen reader automation (NVDA speech output verification)
+
+---
+
+## Proposed Solution
+
+### Phase 2.5: Enhanced Voice Access & Screen Reader Checks (10 days)
+
+**Add 8 new rules** to Smart A11y Scanner:
+
+#### Voice Access (3 rules, 4 days)
+1. **Label in Name (WCAG 2.5.3)** — Visible label matches accessible name
+2. **Target Size Minimum (WCAG 2.5.8)** — Interactive elements ≥24×24 CSS pixels
+3. **No Complex Gestures (WCAG 2.5.1)** — Heuristic detection of multi-touch interactions
+
+#### Screen Reader (5 rules, 6.5 days)
+1. **Live Regions (WCAG 4.1.3)** — Dynamic content announced via aria-live/role=alert
+2. **Landmark Regions (WCAG 1.3.1)** — Page structure: main, nav, aside, footer
+3. **Skip Links (WCAG 2.4.1)** — Skip navigation to main content
+4. **Reading Order vs. Visual Order (WCAG 1.3.2)** — DOM order matches visual order
+5. **Page Title & SPA Navigation (WCAG 2.4.2)** — Page has descriptive title; title updates on route change
+
+**Implementation:**
+- All checks use Playwright DOM analysis (`page.evaluate()`, `getBoundingClientRect()`, CSS property inspection)
+- No new npm dependencies
+- Rules follow existing category structure (add to `src/rules/categories/input-modalities.ts`, `aria.ts`, `screen-reader.ts`)
+- Integrate into existing `DynamicAnalyzer` or create `AssistiveTechAnalyzer`
+
+**Manual Testing Guidance:**
+- Create `.ai-team/testing/screen-reader-manual-procedures.md`
+- Document NVDA/Narrator test procedures
+- Provide checklists for high-risk components (custom widgets, modals, carousels)
+
+---
+
+### Phase 3b: NVDA Automation Bridge (Q3 2026, optional)
+
+**If aria-at integration approved:**
+- Evaluate NVDA automation via aria-at project (W3C-maintained)
+- Build Python ↔ Node.js IPC bridge
+- Automate 5-7 checks: dialog focus, live region announcements, heading announcements, form labels, link purpose
+- Estimated effort: 12-14 weeks
+
+**Decision:** Defer decision until Phase 2.5 complete. Approve now only if team commits to Phase 3b timeline.
+
+---
+
+## Decision Points for Team
+
+1. **Scope:** Approve all 8 Phase 2.5 checks, or subset?
+   - **Recommended:** All 8 (covers WCAG 2.1 AA voice + screen reader requirements)
+   - **Minimum viable:** Voice checks (1, 2) + Live Regions (1) = 2-3 weeks
+
+2. **NVDA Automation (Phase 3b):**
+   - Option A: Approve aria-at integration path (commit to Q3 2026)
+   - Option B: Continue manual testing guidance only (lowest cost)
+   - Option C: Revisit 2027 if automation tools mature (defer decision)
+   - **Recommended:** Option C (no commitment risk; reassess in 2027)
+
+3. **Priority:** Phase 2.5 checks must complete **before Phase 2 ships** (Playwright dynamic checks).
+   - Reason: Voice access checks are WCAG 2.1 AA required; shipping without them blocks compliance.
+   - Timeline: Phase 2 = 8-10 weeks; Phase 2.5 = 2 additional weeks → ship together Week 10.
+
+---
+
+## Impact Analysis
+
+### Accessibility Coverage Improvement
+
+| Criterion | Before | After | Status |
+|-----------|--------|-------|--------|
+| 2.5.1 Pointer Gestures | ❌ No | ✅ Heuristic | Green |
+| 2.5.3 Label in Name | ⚠️ Axe-core partial | ✅ Enhanced | Green |
+| 2.5.8 Target Size | ❌ No | ✅ Yes | Green |
+| 4.1.3 Status Messages | ⚠️ Static only | ✅ Live regions | Green |
+| 2.4.1 Bypass Blocks | ❌ No | ✅ Yes | Green |
+| 2.4.2 Page Title | ❌ No | ✅ Yes | Green |
+| 1.3.2 Meaningful Sequence | ⚠️ Static only | ✅ CSS reordering | Green |
+| 1.3.1 Info & Relationships | ✅ Axe-core | ✅ + landmarks | Green |
+
+**Result:** WCAG 2.1 AA voice + screen reader coverage increases from 60% → 90%.
+
+### Resource Impact
+
+- **Engineering effort:** 10-12 days (Naomi/Alex, can parallelize with Phase 2)
+- **QA effort:** 3-5 days (Amos, manual testing validation)
+- **Documentation:** 2 days (Drummer)
+- **No infrastructure cost** (no new services, existing Playwright)
+
+### Risk Assessment
+
+**Low risk:**
+- All checks use existing Playwright API
+- Follow proven pattern from dynamic checks
+- No new dependencies
+
+**Medium risk:**
+- Gesture detection heuristics may have false positives (requires test refinement)
+- Reading order detection requires CSS property inspection (may miss edge cases)
+- Mitigation: Flag as "manual testing recommended" in findings
+
+**Deferred:**
+- NVDA automation (Phase 3b) carries higher risk if aria-at integration needed
+
+---
+
+## Recommendation
+
+**✅ APPROVE Phase 2.5: Voice Access & NVDA Checks**
+- Solves GalGoldi72's request ("what about voice access, NVDA?")
+- Closes WCAG 2.1 AA gap
+- Enables Microsoft accessibility certification
+- Minimal resource impact
+- Pairs naturally with Phase 2 (dynamic checks)
+
+**⏸ DEFER Phase 3b decision** until Phase 2.5 complete (Q2 2026). Reassess aria-at maturity and team bandwidth in Q3.
+
+---
+
+## Success Criteria
+
+Phase 2.5 is complete when:
+- [ ] 8 new rules implemented and tested
+- [ ] Findings integrated into reports (mark as "Voice Access" / "Screen Reader" tags)
+- [ ] Manual testing procedures documented
+- [ ] Tested on 3+ accessibility-focused sites (Microsoft, WebAIM, Deque)
+- [ ] WCAG 2.1 AA voice + screen reader coverage ≥85%
+- [ ] No new regressions in Phase 1/2 checks
+
+---
+
+## Questions for Team Discussion
+
+1. **Holden (Lead):** Should Phase 2.5 integrate into Phase 2 codebase or be separate release?
+2. **Naomi (Backend):** Preferred location for new rules — DynamicAnalyzer or new AssistiveTechAnalyzer class?
+3. **Alex (Frontend):** Any UI considerations for reporting assistive tech findings separately?
+4. **Amos (Tester):** Resources available for NVDA manual testing in Q2 2026?
+5. **Avasarala (PM):** Should Marketing highlight "Voice Access + NVDA support" in Phase 2.5 messaging?
+
+---
+
+## Appendix: Detailed Analysis
+
+See `docs/voice-access-nvda-plan.md` for:
+- Part 1: 12 detailed checks (voice + screen reader) with WCAG references
+- Part 2: Screen reader automation state in 2024-2026
+- Part 3: Implementation roadmap and delivery timeline
+
+### 2026-02-24: .gitignore and sensitive data scrubbing required before public push
+**By:** Holden
+**What:** Created `.gitignore` excluding `node_modules/`, `dist/`, `a11y-reports/`, `.a11y-patterns/`, `.env*`, IDE files, OS files, logs, and coverage output. Removed `node_modules/` (5,829 files) and `dist/` (116 files) from git tracking. Replaced real Azure tenant/resource GUIDs in test files with obviously-fake placeholders. Removed corporate email from `.ai-team/team.md`. Replaced hardcoded form test password in `detection/types.ts`.
+**Why:** Repository had no `.gitignore` — pushing to GitHub would have published all of `node_modules`, compiled output, scan reports containing internal Microsoft portal URLs/tenant IDs/OAuth tokens/screenshots, and personal corporate email. These are not credentials per se, but they expose internal infrastructure details and personally identifiable information that should never be in a public repo.
+
+# Decision: DynamicAnalyzer Module
+
+**Date:** 2026-02-25  
+**Author:** Naomi (Backend Dev)  
+**Status:** Implemented  
+**File:** `src/scanner/dynamic-analyzer.ts`
+
+## What
+
+New `DynamicAnalyzer` class that performs 10 Playwright-driven accessibility checks requiring active browser manipulation. Complements the existing `PageAnalyzer` (static axe-core + hand-rolled DOM checks).
+
+## Checks Implemented
+
+| # | Check | WCAG | Severity | Category |
+|---|-------|------|----------|----------|
+| 1 | `checkZoomReflow()` — 200% zoom, horizontal scroll, text clipping | 1.4.4, 1.4.10 | serious | distinguishable |
+| 2 | `checkTextSpacing()` — WCAG spacing overrides, overflow detection | 1.4.12 | serious | distinguishable |
+| 3 | `checkKeyboardNavigation()` — Tab 30x, focus indicators, keyboard traps | 2.1.1, 2.1.2, 2.4.7 | critical/serious | keyboard/navigable |
+| 4 | `checkFocusOrder()` — Tab order vs visual order | 2.4.3 | serious | navigable |
+| 5 | `checkLabelInName()` — Visible text in accessible name | 2.5.3 | moderate | input-modalities |
+| 6 | `checkTargetSize()` — 24×24px minimum | 2.5.8 | moderate | input-modalities |
+| 7 | `checkLandmarks()` — main, nav, any landmarks | 1.3.1 | serious/moderate | screen-reader |
+| 8 | `checkSkipLinks()` — First focusable = skip link | 2.4.1 | moderate | navigable |
+| 9 | `checkLiveRegions()` — Missing aria-live on dynamic containers | 4.1.3 | moderate | screen-reader |
+| 10 | `checkOrientation()` — Portrait/landscape viewport test | 1.3.4 | moderate/serious | adaptable |
+
+## Design Decisions
+
+1. **Independent try/catch per check** — one failing check does not block others
+2. **Deadline parameter** — `analyze(page, deadline)` skips remaining checks when time runs out
+3. **State reset in finally blocks** — zoom, injected styles, and viewport restored after each check
+4. **No engine.ts changes yet** — module is standalone; integration is a separate step
+5. **`dynamicChecks?: boolean` added to ScanConfig** — opt-in flag, default false
+
+## Integration Plan
+
+Engine will call `dynamicAnalyzer.analyze(page)` after `pageAnalyzer.analyze(page)` when `config.dynamicChecks` is true. This is a future step — not wired yet.
+
+## What This Does NOT Cover
+
+- Screenshot-based pixel comparison for focus visibility (deferred — needs image processing library)
+- Animation/flash detection (WCAG 2.3.1) — requires frame capture over time
+- MutationObserver-based live region detection — current approach is heuristic/static
+- These are P1/P2 items for a future sprint
+
+# LEARN → INVENT Pipeline Implementation
+
+**By:** Naomi
+**Date:** 2026-02-24
+
+## What
+
+Implemented Phases 1, 2, and 4 of the AI Test Plan Learning & Generation architecture from Holden's design doc.
+
+### Phase 1 — Pattern Types & Database
+- `src/scanner/patterns/types.ts`: Full type definitions for the LEARN → INVENT pipeline (LearnedPatterns, PageSnapshot, ExtractionConfig, GenerationConfig, etc.)
+- `src/scanner/patterns/pattern-database.ts`: File-based persistence layer. Saves/loads/merges patterns per-site in `.a11y-patterns/{hostname}/`. Timestamped files with latest copy.
+
+### Phase 2 — Pattern Extraction & Snapshot Capture
+- `src/scanner/patterns/pattern-extractor.ts`: Extracts page patterns, interaction patterns, navigation flow, and coverage map from guided execution traces. All heuristic — no LLM.
+- `src/scanner/guided-explorer.ts`: Added `captureSnapshot()` using `page.evaluate()` to walk DOM for interactive elements, landmarks, headings, and a11y tree. Gated behind `config.learn || config.captureSnapshots`.
+
+### Phase 4 — Engine Wiring
+- `src/scanner/engine.ts`: LEARN phase calls PatternExtractor → PatternDatabase after guided exploration. GENERATE phase dynamically imports TestPlanGenerator, generates scenarios, executes them via GuidedExplorer round 2, and tags findings.
+- `src/scanner/types.ts`: Added `learn`, `generate`, `aiGenerate`, `patternDir`, `maxGenerated`, `generationStrategies`, `captureSnapshots` to ScanConfig. Added `learningSummary` and `generationSummary` to ScanResult.
+
+## Why
+
+Users write a few test plans, the scanner learns structural and interaction patterns from the execution trace, then generates additional test scenarios to fill coverage gaps. Generated scenarios use the same `ImportedTestScenario` shape so they feed into GuidedExplorer with zero integration cost.
+
+## Key Design Decisions
+
+1. **Snapshot capture is gated** — only runs when `config.learn` or `config.captureSnapshots` is true. Zero perf cost when not learning.
+2. **Dynamic import for TestPlanGenerator** — `await import('./patterns/test-plan-generator.js')` inside a try/catch so the generate phase degrades gracefully if the module isn't available.
+3. **Pattern merge is additive** — patterns accumulate across runs. Page patterns union by fingerprint, element groups by role+selector, interaction patterns by name.
+4. **Element similarity is label-based** — Jaccard similarity on word sets plus role matching. No LLM needed for extraction.
+5. **`generationStrategies` is `string[]` on ScanConfig** — cast to `GenerationStrategy[]` at the call boundary to keep config JSON-friendly.
+
+## Verification
+
+- `npm run build` — clean compile
+- `npm test` — all 43 existing tests pass
+
+# Decision: Overlay Analyze-Only Mode
+
+**Author:** Naomi (Backend Dev)
+**Date:** 2025-07-25
+**Status:** Implemented
+**Commit:** b9b6abb
+
+## Context
+
+During deep exploration, when a panel/overlay opens (e.g., a settings flyout), the scanner was attempting to click through all interactive elements inside the overlay AND the elements behind it. Elements behind the overlay are blocked by the panel's backdrop, causing Playwright clicks to fail or time out. In scan #15 this caused the scanner to hang for 5+ minutes trying to explore 173 blocked elements.
+
+## Decision
+
+When an overlay is detected during `exploreState()`, the scanner now enters **analyze-only mode**: it runs accessibility analysis (axe-core + hand-rolled checks) on the current page state but skips element exploration entirely. The overlay is then closed via `closeOverlay()` before continuing normal exploration.
+
+Additionally, `closeOverlay()` was rewritten with 6 ordered strategies and diagnostic logging:
+1. Press Escape
+2. Click close button (visible overlays only)
+3. Click dismiss buttons by text (Got it, Close, Dismiss, etc.)
+4. Click Cancel/Close text buttons (Cancel prioritized over Close)
+5. Case-insensitive aria-label matching for close buttons
+6. Click outside the overlay
+
+## Rationale
+
+- Clicking blocked elements is wasted time — the overlay prevents interaction with underlying content
+- Accessibility analysis still captures findings from the overlay's content, which is valuable
+- The 6-strategy close approach handles the variety of overlay implementations seen in Microsoft portals
+- Diagnostic logging makes it easy to debug overlay issues in future scans
+
+## Impact
+
+- Scan #16 completed in 93s (down from 5+ min hang)
+- Panel closed successfully via Escape (Strategy 1)
+- 8 findings across 2 states — no loss of coverage
+- File: `src/scanner/deep-explorer.ts`
+
+# Decision: SIP URL Normalization & Popup Dismissal Hardening
+**Author:** Naomi (Backend Dev)
+**Date:** 2026-02-25
+
+## SIP URL Normalization
+- Exported `normalizePageUrl(rawUrl, targetUrl)` from `src/scanner/page-analyzer.ts`.
+- If the page URL hostname has a `sip.` prefix relative to the target (e.g. `sip.security.microsoft.com` → `security.microsoft.com`), the target hostname is used instead.
+- Applied at every point where `finding.pageUrl` is stamped — both in PageAnalyzer and DeepExplorer.
+- Other team members: if you set `pageUrl` on findings, use `normalizePageUrl()` to keep URLs consistent.
+
+## Popup Dismissal Improvements
+- `closeOverlay()` now verifies overlay count decreased after each dismiss strategy (was fire-and-forget).
+- Strategy order changed: Escape → close buttons → text-based dismiss buttons → click outside.
+- New `tryTextBasedDismiss()` method clicks buttons with common dismiss text ("Got it", "Close", "Dismiss", "OK", "Skip", etc.) inside dialog containers.
+- `dismissInitialPopups()` has a fallback path: if overlay persists after `closeOverlay()`, it tries `tryTextBasedDismiss()` again.

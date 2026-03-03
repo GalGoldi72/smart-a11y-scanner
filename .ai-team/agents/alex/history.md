@@ -56,3 +56,46 @@
 
 ## 2026-02-23 (continued): LEARN → INVENT CLI Flags
 📌 **Learn/Generate CLI Flags** — New decision by Alex: Added 5 flags (--learn, --generate, --ai-generate, --pattern-dir, --max-generated) to wire Holden's LEARN → INVENT pipeline into the CLI. HTML report shows Learning Summary and AI-Generated Tests sections. Reporters use temporary s any casts pending Naomi's type extensions on ScanConfig and ScanResult.
+
+- HTML report now has a sticky filter toolbar above Detailed Findings: severity toggle buttons (critical/serious/moderate/minor) and category toggle buttons, all ON by default. Clicking toggles visibility of matching `.finding-card` elements. Live "Showing X of Y findings" counter updates on every filter change.
+- View toggle "By Page" vs "By Severity" switches between the existing page-grouped layout and a flat list sorted globally by severity (critical first). Severity view includes a small page-origin label on each card for context.
+- All filtering/sorting is client-side vanilla JS in `buildScript()`. Filter toolbar uses `data-severity` and `data-category` attributes already present on `.finding-card` divs. Page sections with zero visible findings are auto-hidden.
+- `buildFilterToolbar()` and `buildSeverityView()` are new functions. `buildFindingCard()` gained optional `pageLabel?: string` param (only used by severity view). CSS uses existing design tokens (same colors, border-radius, shadows). Toolbar is `position: sticky; top: 0; z-index: 100` so it stays visible while scrolling.
+- Filter toolbar and severity view are hidden in `@media print`.
+- BUG FIX: "By Severity" view toggle was broken because the JS set `sevView.style.display = ''` to show it, but CSS had `#severity-view { display: none; }` which took over once the inline style was cleared. Fix: set `display = 'block'` explicitly. Lesson: when a CSS rule hides an element, clearing the inline style doesn't override it — you must set a concrete display value.
+
+## 2026-02-24: README Creation for Open Source Launch
+📌 **Professional README.md** — Comprehensive guide for GitHub public release. Covers project identity, features, prerequisites, installation, usage, configuration, report formats, WCAG 2.2 coverage, and contribution guidelines.
+
+**Key file references documented:**
+- `package.json`: version 0.1.0, Node >=18.0.0, bin aliases `a11y-scan` and `smart-a11y-scanner` for dual CLI entry points
+- `src/cli.ts`: 30+ CLI flags with accurate types, defaults, and descriptions. Exit codes: 0 (clean), 1 (findings), 2 (error)
+- `config.example.yaml`: YAML template structure with all configurable fields (depth, maxPages, timeouts, output formats, WCAG levels, ADO settings)
+- `docs/PRD.md`: Product vision, value prop, WCAG 2.2 compliance checklist across all major categories
+
+**README sections:**
+1. Header with badges (Node, TypeScript, License, WCAG)
+2. Tagline: "AI-powered accessibility scanner for web applications — auto-discovers UI flows, detects WCAG 2.2 violations, files ADO bugs"
+3. "What It Does" — 5-step core loop with user personas
+4. Key Features — 13 major capabilities with emoji callouts
+5. Prerequisites — Node 18+, Playwright, optional ADO PAT
+6. Installation — 3 paths (global CLI, npm lib, from source)
+7. Quick Start — 6 realistic examples (basic, depth, reports, auth, ADO, test plan, Edge)
+8. Complete Usage — command syntax, all flags in table format with type/default/description
+9. Exit codes table
+10. Detailed Examples — 7 command variations with multi-line formatting
+11. Configuration — YAML template + env vars (A11Y_SCANNER_CREDENTIALS, ADO_PAT, OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT)
+12. Report Formats — HTML (interactive dashboard with filters, test plan timeline, learning sections), JSON (example structure), CSV (column list)
+13. WCAG 2.2 Coverage — checkmark list of all major categories covered (semantic, color, keyboard, screen reader, forms, zoom, voice)
+14. Contributing — dev setup, architecture overview with 6 src/ directories
+15. Troubleshooting — 4 common issues with solutions
+16. License, Support, attribution
+
+**Design decisions:**
+- All flag names copied verbatim from cli.ts (--ado-org, --explore-depth, etc.)
+- Severity levels use Drummer's canonical names: critical, serious, moderate, minor
+- Markdown tables for structured data (options, env vars, exit codes) for GitHub readability
+- Example commands use realistic URLs and multi-line formatting for clarity
+- HTML report features listed with emoji for quick visual scanning
+- WCAG categories grouped into 7 major sections with checkmarks for compliance status
+📌 Team update (2026-03-03): HTML report filter toolbar added with severity/category filters and flat severity view. Decision by Alex

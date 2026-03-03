@@ -7,7 +7,7 @@
 | **Project** | Smart A11y Scanner |
 | **Description** | AI-powered accessibility scanner that takes a URL, crawls the website, auto-detects UI flows/links/buttons/HTML, mocks user navigation, and files accessibility bugs as ADO work items. Follows latest WCAG 2.2 standards covering zoom, ARIA labels, color contrast, voice access, NVDA compatibility, and more. |
 | **Stack** | TypeScript, Node.js, Playwright (browser automation), Azure DevOps API |
-| **User** | GalGoldi72 (ggoldshtein@microsoft.com) |
+| **User** | GalGoldi72 |
 
 ## Members
 

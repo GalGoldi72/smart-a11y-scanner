@@ -50,3 +50,5 @@
 - `focus-order-mismatch` requires ≥3 DOM-order focusable elements and ≥2 backward jumps of >200px vertically during Tab navigation.
 - `checkOrientation` uses viewport sizes 768×1024 (portrait) and 1024×768 (landscape) with a 20px tolerance for scrollbar width.
 - Total project test count: 124 tests (103 prior + 21 new).
+
+📌 Team update (2026-03-03): Multiple dynamic and voice/screen-reader checks requiring QA validation. See decisions.md for scope. Decisions by Drummer/Naomi

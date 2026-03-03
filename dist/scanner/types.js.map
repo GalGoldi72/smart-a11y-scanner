@@ -1,1 +1,0 @@
-{"version":3,"file":"types.js","sourceRoot":"","sources":["../../src/scanner/types.ts"],"names":[],"mappings":"AAAA;;;;GAIG;AA8BH,MAAM,CAAC,MAAM,mBAAmB,GAAe;IAC7C,GAAG,EAAE,EAAE;IACP,QAAQ,EAAE,CAAC;IACX,cAAc,EAAE,IAAI;IACpB,QAAQ,EAAE,EAAE;IACZ,aAAa,EAAE,MAAM;IACrB,QAAQ,EAAE,IAAI;IACd,aAAa,EAAE,IAAI;IACnB,cAAc,EAAE,GAAG;IACnB,kBAAkB,EAAE,IAAI;CACzB,CAAC"}

@@ -40,3 +40,5 @@
 📌 **AI Test Generation Post-Roadmap** — Holden's new design: Post-demo feature to auto-synthesize test scenarios from execution patterns. PatternExtractor + TestPlanGenerator (LEARN → INVENT pipeline). ~4 weeks, 7 implementation phases. Lower priority than core test plan execution. Feature enables users to get progressively better test coverage over multiple runs without manually designing new scenarios.
 
 📌 **Element Prioritization Improves All Scans** — Smart P1/P2/P3 classification: Content first, Navigation second, Chrome skipped. DFS now allocates time to actual page interactions instead of shell infrastructure. Immediate value across all scan modes (manual, test-plan, SPA discovery).
+
+📌 Team update (2026-03-03): Dynamic checks and voice/NVDA support impact product roadmap and user messaging. See decisions.md. Decisions by Drummer/Holden
