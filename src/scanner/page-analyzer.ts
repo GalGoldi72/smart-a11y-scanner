@@ -12,9 +12,10 @@
 
 import { Page, ElementHandle } from 'playwright';
 import { AxeBuilder } from '@axe-core/playwright';
-import { PageMetadata, PageResult, Finding } from './types.js';
+import { PageMetadata, PageResult, Finding, DiscoveredElement } from './types.js';
 import { ScanConfig } from './types.js';
 import { RuleCategory, Severity, WcagLevel } from '../rules/types.js';
+import { UIDetector } from '../detection/ui-detector.js';
 
 /** Map axe-core category tags to our RuleCategory */
 const AXE_CATEGORY_MAP: Record<string, RuleCategory> = {
@@ -130,11 +131,17 @@ export class PageAnalyzer {
         f.pageUrl = normalizePageUrl(f.pageUrl || url, this.config.url);
       }
 
+      // Discover interactive UI elements for test case generation.
+      // SPAs often load content lazily — wait for main content area to populate.
+      await this.waitForMainContent(page);
+      const discoveredElements = await this.discoverPageElements(page);
+
       return {
         url,
         metadata,
         findings: merged,
         analysisTimeMs: Date.now() - start,
+        discoveredElements,
       };
     } catch (err) {
       return {
@@ -168,6 +175,242 @@ export class PageAnalyzer {
         h1Count: document.querySelectorAll('h1').length,
       };
     }, url);
+  }
+
+  /**
+   * Discover interactive UI elements on the page for navigation-flow test case generation.
+   * Uses UIDetector when available, falls back to a lightweight in-page extraction.
+   */
+  /**
+   * Wait for content-level interactive elements to appear inside [role=main].
+   * Specifically waits for buttons/inputs/links (excluding tabs and menuitems
+   * which are navigation chrome, not page content).
+   */
+  private async waitForMainContent(page: Page): Promise<void> {
+    const maxWaitMs = 25_000;
+    const interval = 2500;
+    let prevCount = 0;
+    let stableChecks = 0;
+    const deadline = Date.now() + maxWaitMs;
+
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(interval);
+      const count = await page.evaluate(() => {
+        const main = document.querySelector('[role=main], main');
+        if (!main) return 0;
+        // Count only content-level controls, not tabs or menu items
+        const all = main.querySelectorAll('button, [role=button], a[href], input, select, textarea, [role=combobox], [role=checkbox], [role=switch], [aria-expanded], table, [role=table]');
+        let contentCount = 0;
+        for (const el of all) {
+          const role = el.getAttribute('role');
+          if (role === 'tab' || role === 'menuitem') continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) contentCount++;
+        }
+        return contentCount;
+      }).catch(() => 0);
+
+      if (count > 0 && count === prevCount) {
+        stableChecks++;
+        if (stableChecks >= 2) return;
+      } else {
+        stableChecks = 0;
+      }
+      prevCount = count;
+    }
+  }
+
+  private async discoverPageElements(page: Page): Promise<DiscoveredElement[]> {
+    try {
+      // Extract elements scoped to the main content area (not shell chrome).
+      const contentElements = await this.extractMainContentElements(page);
+      if (contentElements.length > 0) return contentElements;
+
+      // Check if [role=main] exists — if it does, return empty rather than
+      // falling back to whole-page extraction (which picks up shell chrome).
+      const hasMain = await page.evaluate(() => !!document.querySelector('[role=main], main')).catch(() => false);
+      if (hasMain) return [];
+
+      // Fallback: use UIDetector for the whole page (when no [role=main] exists)
+      const allElements = await this.extractAllPageElements(page);
+      return allElements;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Extract interactive elements scoped to the main content area only.
+   * Excludes shell chrome (app bar, left navigation, global search).
+   */
+  private async extractMainContentElements(page: Page): Promise<DiscoveredElement[]> {
+    const raw = await page.evaluate(() => {
+      const mainEl = document.querySelector('[role=main], main');
+      if (!mainEl) return [];
+
+      const results: Array<{
+        label: string; kind: string; selector: string;
+        role: string | null; ariaExpanded: string | null; tag: string;
+      }> = [];
+
+      // Build a simple selector for an element
+      const buildSelector = (el: Element): string => {
+        if (el.id) return `#${el.id}`;
+        const tag = el.tagName.toLowerCase();
+        const cls = Array.from(el.classList).slice(0, 2).join('.');
+        return cls ? `${tag}.${cls}` : tag;
+      };
+
+      // Query interactive elements inside main content area.
+      // Excludes [role=tab] and [role=menuitem] — those are page navigation, not content.
+      const selectors = [
+        'button', '[role=button]',
+        'a[href]', 'input', 'select', 'textarea',
+        '[role=combobox]', '[role=listbox]', '[role=checkbox]', '[role=switch]',
+        'h1', 'h2', 'h3', 'h4', '[role=heading]',
+        'table', '[role=table]', '[role=grid]', '[role=treegrid]',
+        '[role=row][data-is-focusable=true]', '[data-selection-index]',
+        '[aria-expanded]',
+        '[role=dialog]', '[role=complementary]',
+      ].join(', ');
+
+      const els = mainEl.querySelectorAll(selectors);
+      for (const el of els) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+
+        const label = (
+          el.getAttribute('aria-label') ||
+          el.getAttribute('title') ||
+          // Use only direct text content, not concatenated child text
+          Array.from(el.childNodes)
+            .filter(n => n.nodeType === Node.TEXT_NODE)
+            .map(n => n.textContent?.trim())
+            .filter(Boolean)
+            .join(' ')
+            .substring(0, 120) ||
+          // Last resort: first text child element
+          el.querySelector(':scope > span, :scope > *:first-child')?.textContent?.trim().substring(0, 80) ||
+          el.textContent?.trim().substring(0, 40) ||
+          ''
+        ).trim().substring(0, 120);
+        if (!label || label.length < 2) continue;
+
+        const role = el.getAttribute('role');
+        const tag = el.tagName.toLowerCase();
+
+        // Skip page-navigation elements — tabs and menu items are out of scope
+        if (role === 'tab' || role === 'menuitem') continue;
+
+        // Classify the element — only content-level controls
+        let kind = 'unknown';
+        if (tag === 'button' || role === 'button') {
+          kind = el.getAttribute('aria-expanded') !== null ? 'accordion' : 'button';
+        }
+        else if (tag === 'a' || role === 'link') kind = 'link';
+        else if (tag === 'input' || tag === 'select' || tag === 'textarea' ||
+                 role === 'combobox' || role === 'listbox' || role === 'checkbox' || role === 'switch')
+          kind = 'form-control';
+        else if (tag === 'table' || role === 'table' || role === 'grid' || role === 'treegrid') kind = 'table';
+        else if (role === 'row' && (el.getAttribute('data-is-focusable') === 'true' || el.getAttribute('data-selection-index'))) kind = 'table-row';
+        else if (el.getAttribute('data-selection-index') && rect.width > 200) kind = 'table-row';
+        else if (tag.match(/^h[1-4]$/) || role === 'heading') kind = 'heading';
+        else if (role === 'dialog' || role === 'complementary') kind = 'dialog';
+        else if (el.getAttribute('aria-expanded') !== null) kind = 'accordion';
+
+        if (kind === 'unknown') continue;
+
+        results.push({
+          label, kind, selector: buildSelector(el),
+          role, ariaExpanded: el.getAttribute('aria-expanded'), tag,
+        });
+      }
+      return results;
+    });
+
+    // Map raw results to DiscoveredElement, deduplicating
+    const elements: DiscoveredElement[] = [];
+    const seenLabels = new Set<string>();
+
+    for (const el of raw) {
+      // Clean label
+      let label = el.label.replace(/\bundefined\b/gi, '').trim();
+      if (!label || label.length < 2) continue;
+      // For long labels, take just the first clause (before comma/period) as the action name
+      if (label.length > 50) {
+        const shortLabel = label.split(/[,.]/)[0]?.trim();
+        if (shortLabel && shortLabel.length >= 3) {
+          label = shortLabel;
+        } else {
+          label = label.substring(0, 50);
+        }
+      }
+
+      const kind: DiscoveredElement['kind'] = el.kind === 'accordion' ? 'button' : el.kind as DiscoveredElement['kind'];
+
+      // Deduplicate: same label across link+button counts as one (keep button)
+      const labelKey = label.toLowerCase();
+      if (seenLabels.has(labelKey)) continue;
+      seenLabels.add(labelKey);
+
+      // For table rows, only keep one representative row
+      if (kind === 'table-row') {
+        if (elements.some(e => e.kind === 'table-row')) continue;
+      }
+
+      let section: string | undefined;
+      if (el.kind === 'accordion') section = 'accordion section';
+
+      elements.push({ label, kind, selector: el.selector, role: el.role, section });
+    }
+
+    return elements;
+  }
+
+  /**
+   * Fallback: extract elements from the whole page using UIDetector.
+   */
+  private async extractAllPageElements(page: Page): Promise<DiscoveredElement[]> {
+    const detector = new UIDetector({ includeIframes: false, detectEventListeners: false });
+    const raw = await detector.detectAll(page);
+
+    const KIND_MAP: Record<string, DiscoveredElement['kind']> = {
+      'link': 'link', 'button': 'button', 'tab': 'tab',
+      'navigation': 'navigation', 'modal': 'dialog',
+      'accordion': 'button', 'menu': 'menu', 'menu-item': 'menu',
+      'text-input': 'form-control', 'select': 'form-control',
+      'textarea': 'form-control', 'checkbox': 'form-control',
+      'radio': 'form-control', 'slider': 'form-control',
+      'toggle': 'button', 'dialog-trigger': 'button', 'search': 'form-control',
+      'custom-component': 'button', 'carousel': 'button',
+      'dialog': 'dialog', 'menuitem': 'menu',
+      'textbox': 'form-control', 'combobox': 'form-control',
+      'listbox': 'form-control', 'spinbutton': 'form-control',
+      'heading': 'heading', 'table': 'table', 'grid': 'table',
+    };
+
+    const elements: DiscoveredElement[] = [];
+
+    for (const el of raw) {
+      if (!el.isVisible) continue;
+      const label = (el.accessibleName || el.textContent || '').trim()
+        .replace(/\bundefined\b/gi, '').trim();
+      if (!label || label.length < 2 || label.length > 120) continue;
+
+      const kind = KIND_MAP[el.category] ?? KIND_MAP[el.role ?? ''] ?? null;
+      if (!kind) continue;
+
+      if (elements.some(e => e.label === label && e.kind === kind)) continue;
+
+      let section: string | undefined;
+      if (el.category === 'tab' || el.role === 'tab') section = 'tab bar';
+      if (el.category === 'navigation' || el.role === 'navigation') section = 'left navigation';
+      if (el.category === 'menu-item' || el.role === 'menuitem') section = 'navigation';
+
+      elements.push({ label, kind, selector: el.selector, role: el.role, section });
+    }
+
+    return elements;
   }
 
   /** WCAG 1.1.1 — Images must have alt text */

@@ -6,7 +6,7 @@
 
 **AI-powered accessibility scanner for web applications** — Auto-discovers UI flows, detects WCAG 2.2 violations, and files bug reports in Azure DevOps.
 
-[Installation](#installation) • [Quick Start](#quick-start) • [CLI Usage](#usage) • [Configuration](#configuration) • [Contributing](#contributing)
+[Installation](#installation) • [Quick Start](#quick-start) • [CLI Usage](#usage) • [Test Case Suggestions](#test-case-suggestions) • [Configuration](#configuration) • [Contributing](#contributing)
 
 </div>
 
@@ -322,6 +322,101 @@ a11y-scan scan https://example.com \
 ```bash
 a11y-scan scan https://example.com --browser edge
 ```
+
+---
+
+## Test Case Suggestions
+
+Generate ADO-compatible accessibility test case suggestions for a URL using the `suggest` command.
+
+```
+a11y-scan suggest <url> [options]
+```
+
+### What It Does
+
+The `suggest` command scans a URL, discovers its interactive UI elements (navigation items, tabs, buttons, forms, tables, dialogs, menus), and generates **navigation-flow test cases** in the same format used by Azure DevOps Test Plans. Each suggestion includes:
+- **Title** — ADO-style title (e.g., `"Verify all the controls present in 'Malware scanning' tab"`)
+- **WCAG Criterion** — Applicable WCAG 2.2 guideline
+- **Priority** — high, medium, or low based on accessibility impact
+- **Steps** — ADO-style "Activate X → Verify Y" navigation-flow steps using actual element names discovered on the page
+- **Rationale** — Why this test matters for accessibility
+
+### Navigation-Flow Format
+
+Test cases follow the ADO test case convention with step-by-step "Activate X → Verify Y" format. Each step pairs a concrete **Action** with an **Expected Result**:
+
+| # | Action | Expected Result |
+|---|--------|-----------------|
+| 1 | Open URL: https://security.microsoft.com/... | Page loads and all controls are displayed on the screen |
+| 2 | Activate 'Cloud' from the left navigation | Related page will display on the screen |
+| 3 | Activate 'Data' tab > Activate any table row | Related page will display on the screen |
+| 4 | Activate 'Malware scanning' tab | 'Malware scanning' tab panel content will display on the screen |
+| 5 | Verify all the controls present in 'Malware scanning' tab | All controls are accessible and properly labeled |
+
+The scanner automatically discovers the page's UI structure and references elements by their visible text labels — no manual element mapping required. Discovery is **scoped to the main content area** (`[role=main]`), excluding shell chrome (app bar, left navigation, global search). Elements like tabs and menu items that are page-level navigation are filtered out so test cases focus on the content of the current view.
+
+> **Note:** For pages with clickable table rows that open side panels, the scanner detects `[role=row]` and `[data-selection-index]` patterns and generates side panel verification steps. Custom div-based tables (without `<table>` or `[role=grid]`) may need proper ARIA roles for full detection.
+
+### Test Case Types
+
+The suggester generates test cases from three sources:
+
+1. **Element-based** (primary) — Discovered UI elements grouped by type:
+   - **Navigation controls** — Left nav items, breadcrumbs, links
+   - **Tab controls** — Tab bars with per-tab verification
+   - **Button controls** — Toolbar buttons, action buttons
+   - **Form controls** — Inputs, selects, checkboxes with label verification
+   - **Table controls** — Data tables with clickable rows and side panel verification
+   - **Dialog/Panel controls** — Modals and side panels with focus trap verification
+   - **Menu controls** — Dropdown menus with keyboard navigation
+
+2. **Violation-based** — Test cases generated from actual WCAG violations detected during the scan
+
+3. **Coverage-gap** — Manual checks for WCAG criteria that automated tools can't fully verify (only suggested for categories relevant to the page content)
+
+Reports are generated in HTML and/or Markdown format with filenames like `{pageName}-{date}.html`.
+
+### Options
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-o, --output <format>` | string | both | Report format: `md`, `html`, or `both` |
+| `--output-path <dir>` | string | ./a11y-reports | Output directory for suggestion reports |
+| `--headed` | boolean | false | Show browser window during scan |
+| `--browser <channel>` | string | chromium | Browser: `chromium` (default) or `edge` |
+| `--interactive-auth` | boolean | false | Pause for manual login before scanning (implies `--headed`) |
+| `--spa` | boolean | true | Discover SPA routes by clicking navigation elements |
+| `--depth <n>` | number | 1 | Crawl depth for SPA discovery |
+| `--timeout <seconds>` | number | 120 | Scan timeout in seconds |
+| `--verbose` | boolean | false | Verbose output during suggestion generation |
+
+### Examples
+
+**Basic suggestion scan (public page):**
+```bash
+a11y-scan suggest https://example.com
+```
+
+**Auth-protected page (recommended for enterprise apps):**
+```bash
+a11y-scan suggest https://security.microsoft.com/cloud-resource/v2?viewid=malware-scanning \
+  --interactive-auth --output html --output-path ./reports
+```
+
+Opens a browser for you to log in, then scans the authenticated page and generates navigation-flow test cases referencing actual UI elements (tabs, buttons, navigation items, etc.).
+
+**Scan with Edge browser (uses existing login session):**
+```bash
+a11y-scan suggest https://portal.example.com --browser edge --headed --output html
+```
+
+**Deep crawl with SPA discovery:**
+```bash
+a11y-scan suggest https://example.com --depth 2 --spa --timeout 300 --verbose
+```
+
+Crawls 2 levels deep, discovers SPA routes, and generates test cases with verbose output.
 
 ---
 

@@ -18,6 +18,15 @@ export type {
 } from './scanner/types.js';
 export { DEFAULT_SCAN_CONFIG } from './scanner/types.js';
 
+// Test case suggestion
+export { TestCaseSuggester } from './scanner/test-case-suggester.js';
+export type { 
+  SuggestedTestCase,
+  TestStep,
+  TestCaseSuggestionResult, 
+  CategorySummary 
+} from './types/suggestion-test-case.js';
+
 // Rules (Drummer)
 export type {
   AccessibilityRule,

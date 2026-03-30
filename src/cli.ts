@@ -17,8 +17,57 @@ import { Reporter } from './reporting/reporter.js';
 import type { ScanResult, AuthConfig, TestPlanConfig } from './scanner/types.js';
 import type { Severity } from './rules/types.js';
 import { parseTestPlanUrl } from './scanner/test-plan-parser.js';
+import { TestCaseSuggester } from './scanner/test-case-suggester.js';
+import { generateSuggestionMdReport } from './reporting/formats/suggestion-md-reporter.js';
+import { generateSuggestionHtmlReport } from './reporting/formats/suggestion-html-reporter.js';
+import { mkdir, writeFile } from 'fs/promises';
+import { join } from 'path';
 
 const VERSION = '0.1.0';
+
+// Slugify a string: lowercase, spaces→hyphens, remove special chars, truncate
+function slugifyPageName(title: string | undefined | null, url?: string): string {
+  // Priority: viewid param → last URL path segment → page title → default
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      // 1. Try viewid query param (e.g., ?viewid=malware-scanning)
+      const viewId = parsed.searchParams.get('viewid');
+      if (viewId && viewId.trim() !== '') {
+        return slugify(viewId);
+      }
+      // 2. Try last meaningful path segment (e.g., /interop/techpartnerscatalog)
+      const pathSegments = parsed.pathname.split('/').filter(s => s.length > 0 && s !== 'v2');
+      const lastSegment = pathSegments[pathSegments.length - 1];
+      if (lastSegment && lastSegment.trim() !== '') {
+        return slugify(lastSegment);
+      }
+    } catch { /* invalid URL, fall through */ }
+  }
+  if (!title || title.trim() === '') {
+    return 'a11y-suggestions';
+  }
+  return slugify(title);
+}
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .substring(0, 50)
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'a11y-suggestions';
+}
+
+// Format date as YYYY-MM-DD
+function formatDateYYYYMMDD(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 const SEVERITY_COLORS: Record<Severity, (s: string) => string> = {
   critical: chalk.red.bold,
@@ -401,6 +450,144 @@ async function runScan(url: string, options: Record<string, unknown>): Promise<v
     console.log(chalk.green('  ✔ No accessibility findings — site looks clean!'));
     process.exit(0);
   }
+}
+
+program
+  .command('suggest')
+  .description('Scan a URL and suggest A11Y test cases')
+  .argument('<url>', 'URL to analyze for A11Y test case suggestions')
+  .option('-o, --output <format>', 'Report format: md, html, or both (default: both)')
+  .option('--output-path <dir>', 'Output directory for reports (default: ./a11y-reports)')
+  .option('--headed', 'Show browser window during scan')
+  .option('--browser <channel>', 'Browser: chromium (default), edge')
+  .option('--timeout <seconds>', 'Scan timeout in seconds (default: 120)', parseInt)
+  .option('--interactive-auth', 'Pause for manual login before scanning (implies --headed)')
+  .option('--spa', 'Discover SPA routes by clicking navigation elements')
+  .option('--depth <n>', 'Crawl depth for SPA discovery (default: 1)', parseInt)
+  .option('--verbose', 'Verbose output')
+  .addHelpText('after', `
+${chalk.bold('Examples:')}
+  $ a11y-scan suggest https://example.com
+  $ a11y-scan suggest https://example.com --output md
+  $ a11y-scan suggest https://example.com --headed --browser edge
+  $ a11y-scan suggest https://example.com --interactive-auth --spa
+  $ a11y-scan suggest https://example.com --spa --depth 2
+`)
+  .action(async (url: string, options: Record<string, unknown>) => {
+    try {
+      await runSuggest(url, options);
+    } catch (err) {
+      console.error(chalk.red(`\n✖ ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(2);
+    }
+  });
+
+async function runSuggest(url: string, options: Record<string, unknown>): Promise<void> {
+  const verbose = !!options['verbose'];
+  const timeoutSec = (options['timeout'] as number | undefined) ?? 120;
+  const interactiveAuth = !!options['interactiveAuth'];
+  const spaDiscovery = !!options['spa'];
+  const maxDepth = (options['depth'] as number | undefined) ?? (spaDiscovery ? 1 : 0);
+  const headed = !!options['headed'] || interactiveAuth;
+  const outputFormat = (options['output'] as string | undefined) ?? 'both';
+  const outputPath = (options['outputPath'] as string | undefined) ?? './a11y-reports';
+  const browserRaw = options['browser'] as string | undefined;
+  const browserChannel = browserRaw === 'edge' || browserRaw === 'msedge' ? 'msedge' as const : 'chromium' as const;
+
+  // Banner
+  console.log('');
+  console.log(chalk.bold.cyan('  ♿ Smart A11y Scanner — Test Case Suggester v' + VERSION));
+  console.log(chalk.gray(`  Target: ${url}`));
+  console.log(chalk.gray(`  Timeout: ${timeoutSec}s`));
+  if (headed) console.log(chalk.gray(`  Mode: headed (browser visible)`));
+  if (interactiveAuth) console.log(chalk.gray(`  Interactive auth: enabled (will pause for login)`));
+  if (spaDiscovery) console.log(chalk.gray(`  SPA discovery: enabled (depth: ${maxDepth})`));
+  if (browserChannel === 'msedge') console.log(chalk.gray(`  Browser: Microsoft Edge`));
+  console.log('');
+
+  // Run suggestion engine
+  console.log(chalk.cyan('  ⟳ Analyzing page for test case suggestions...'));
+  console.log('');
+
+  const suggester = new TestCaseSuggester();
+  const result = await suggester.suggest(url, {
+    timeout: timeoutSec,
+    headed,
+    browser: browserChannel,
+    verbose,
+    interactiveAuth,
+    spaDiscovery,
+    maxDepth,
+  });
+
+  // Print summary
+  console.log('');
+  console.log(chalk.bold('━'.repeat(60)));
+  console.log(chalk.bold('  📊 Suggestion Summary'));
+  console.log(chalk.bold('━'.repeat(60)));
+  console.log(`  ${chalk.gray('URL:')}           ${url}`);
+  console.log(`  ${chalk.gray('Page:')}          ${result.pageTitle}`);
+  console.log(`  ${chalk.gray('Duration:')}      ${(result.duration / 1000).toFixed(1)}s`);
+  console.log(`  ${chalk.gray('Suggestions:')}   ${result.totalSuggestions}`);
+  console.log('');
+  console.log(`  ${chalk.red('🔴 High:')}       ${result.prioritySummary.high}`);
+  console.log(`  ${chalk.yellow('🟡 Medium:')}     ${result.prioritySummary.medium}`);
+  console.log(`  ${chalk.blue('🔵 Low:')}        ${result.prioritySummary.low}`);
+  console.log('');
+
+  console.log(chalk.bold('━'.repeat(60)));
+
+  // Generate reports
+  console.log('');
+  console.log(chalk.cyan('  📄 Generating reports...'));
+
+  await mkdir(outputPath, { recursive: true });
+
+  const shouldGenerateMd = outputFormat === 'md' || outputFormat === 'both';
+  const shouldGenerateHtml = outputFormat === 'html' || outputFormat === 'both';
+
+  let mdPath: string | undefined;
+  let htmlPath: string | undefined;
+
+  if (shouldGenerateMd) {
+    const mdContent = generateSuggestionMdReport(result);
+    const pageName = slugifyPageName(result.pageTitle, result.url);
+    const date = formatDateYYYYMMDD(new Date());
+    mdPath = join(outputPath, `${pageName}-${date}.md`);
+    await writeFile(mdPath, mdContent, 'utf-8');
+
+    const size = Buffer.byteLength(mdContent, 'utf-8');
+    const sizeStr = size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} bytes`;
+    console.log(`    ${chalk.green('✔')} MD    → ${mdPath} (${sizeStr})`);
+  }
+
+  if (shouldGenerateHtml) {
+    const htmlContent = generateSuggestionHtmlReport(result);
+    const pageName = slugifyPageName(result.pageTitle, result.url);
+    const date = formatDateYYYYMMDD(new Date());
+    htmlPath = join(outputPath, `${pageName}-${date}.html`);
+    await writeFile(htmlPath, htmlContent, 'utf-8');
+
+    const size = Buffer.byteLength(htmlContent, 'utf-8');
+    const sizeStr = size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} bytes`;
+    console.log(`    ${chalk.green('✔')} HTML  → ${htmlPath} (${sizeStr})`);
+  }
+
+  // Auto-open the HTML report in the default browser
+  if (htmlPath) {
+    try {
+      const { exec } = await import('child_process');
+      const openCmd = process.platform === 'win32' ? `start "" "${htmlPath}"`
+        : process.platform === 'darwin' ? `open "${htmlPath}"`
+        : `xdg-open "${htmlPath}"`;
+      exec(openCmd);
+      console.log(`    ${chalk.cyan('🌐')} Opening report in browser...`);
+    } catch { /* non-fatal */ }
+  }
+
+  console.log('');
+  console.log(chalk.green('  ✔ Test case suggestions generated successfully!'));
+  process.exit(0);
 }
 
 program.parse();

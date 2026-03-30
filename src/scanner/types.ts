@@ -132,6 +132,22 @@ export interface PageResult {
   /** Screenshot of the page state when scanned (base64 PNG) */
   screenshot?: string;
   error?: string;
+  /** UI elements discovered on the page (navigation, tabs, buttons, etc.) */
+  discoveredElements?: DiscoveredElement[];
+}
+
+/** A UI element discovered on the page, used for generating navigation-flow test cases */
+export interface DiscoveredElement {
+  /** Human-readable label (visible text, aria-label, or accessible name) */
+  label: string;
+  /** Element category */
+  kind: 'navigation' | 'tab' | 'button' | 'heading' | 'link' | 'table' | 'table-row' | 'dialog' | 'form-control' | 'menu' | 'landmark';
+  /** CSS selector */
+  selector: string;
+  /** ARIA role if present */
+  role: string | null;
+  /** Parent section or container label (e.g. "left navigation", "toolbar") */
+  section?: string;
 }
 
 /** Discovered link between pages */
